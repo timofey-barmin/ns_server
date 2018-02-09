@@ -279,7 +279,8 @@ validate_get_users(Args, DomainAtom, HasStartFrom) ->
                         menelaus_util:return_value(startFromDomain, DomainAtom, R4_1)
                 end
         end,
-    menelaus_util:validate_unsupported_params(R4).
+    R5 = menelaus_util:validate_any_value(permission, R4),
+    menelaus_util:validate_unsupported_params(R5).
 
 handle_get_users(Path, Domain, Req) ->
     menelaus_util:assert_is_50(),
@@ -292,11 +293,25 @@ handle_get_users(Path, Domain, Req) ->
     end.
 
 handle_get_users_with_domain(Req, DomainAtom, Path) ->
-    Query = Req:parse_qs(),
+    case proplists:get_value("permission", Req:parse_qs(), undefined) of
+        undefined ->
+            handle_get_users_with_domain(Req, DomainAtom, Path, no_check);
+        RawPermission ->
+            case parse_permission(RawPermission) of
+                error ->
+                    menelaus_util:reply_json(Req,
+                                             <<"Malformed permission.">>,
+                                             400);
+                Perm ->
+                    handle_get_users_with_domain(Req, DomainAtom, Path, Perm)
+            end
+    end.
 
+handle_get_users_with_domain(Req, DomainAtom, Path, Permission) ->
+    Query = Req:parse_qs(),
     case lists:keyfind("pageSize", 1, Query) of
         false ->
-            handle_get_all_users(Req, {'_', DomainAtom});
+            handle_get_all_users(Req, {'_', DomainAtom}, Permission);
         _ ->
             HasStartFrom = lists:keyfind("startFrom", 1, Query) =/= false,
             menelaus_util:execute_if_validated(
@@ -306,11 +321,13 @@ handle_get_users_with_domain(Req, DomainAtom, Path) ->
                               undefined ->
                                   undefined;
                               U ->
-                                  {U, proplists:get_value(startFromDomain, Values)}
+                                  {U, proplists:get_value(startFromDomain,
+                                                          Values)}
                           end,
                       handle_get_users_page(Req, DomainAtom, Path,
-                                            proplists:get_value(pageSize, Values),
-                                            Start)
+                                            proplists:get_value(pageSize,
+                                                                Values),
+                                            Start, Permission)
               end, Req, validate_get_users(Query, DomainAtom, HasStartFrom))
     end.
 
@@ -324,10 +341,11 @@ handle_get_users_45(Req) ->
              end, Users),
     menelaus_util:reply_json(Req, Json).
 
-handle_get_all_users(Req, Pattern) ->
+handle_get_all_users(Req, Pattern, Permission) ->
     Passwordless = menelaus_users:get_passwordless(),
     pipes:run(menelaus_users:select_users(Pattern),
               [filter_out_invalid_roles(),
+               filter_by_permission(Permission),
                jsonify_users(Passwordless),
                sjson:encode_extended_json([{compact, false},
                                            {strict, false}]),
@@ -348,6 +366,12 @@ handle_get_user(Domain, UserId, Req) ->
                     menelaus_util:reply_json(Req, get_user_json(Identity))
             end
     end.
+
+filter_by_permission(Permission) ->
+    pipes:filter(
+      fun ({{user, User}, _}) ->
+              allowed == menelaus_auth:check_permission(User, Permission)
+      end).
 
 filter_out_invalid_roles() ->
     Definitions = menelaus_roles:get_definitions(),
@@ -520,11 +544,12 @@ json_from_skews([SkewPrev, SkewThis, SkewLast], PageSize, UserJson) ->
     {[{skipped, skew_skipped(SkewThis)}, {users, [UserJson(El) || El <- Users]}],
      seed_links([{first, First}, {prev, Prev}, {next, CorrectedNext}, {last, Last}])}.
 
-handle_get_users_page(Req, DomainAtom, Path, PageSize, Start) ->
+handle_get_users_page(Req, DomainAtom, Path, PageSize, Start, Permission) ->
     Passwordless = menelaus_users:get_passwordless(),
     {PageSkews, Total} =
         pipes:run(menelaus_users:select_users({'_', DomainAtom}),
-                  filter_out_invalid_roles(),
+                  [filter_out_invalid_roles(),
+                   filter_by_permission(Permission)],
                   ?make_consumer(
                      pipes:fold(
                        ?producer(),
