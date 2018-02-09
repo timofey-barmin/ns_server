@@ -293,18 +293,12 @@ handle_get_users(Path, Domain, Req) ->
     end.
 
 handle_get_users_with_domain(Req, DomainAtom, Path) ->
-    case proplists:get_value("permission", Req:parse_qs(), undefined) of
-        undefined ->
-            handle_get_users_with_domain(Req, DomainAtom, Path, no_check);
-        RawPermission ->
-            case parse_permission(RawPermission) of
-                error ->
-                    menelaus_util:reply_json(Req,
-                                             <<"Malformed permission.">>,
-                                             400);
-                Perm ->
-                    handle_get_users_with_domain(Req, DomainAtom, Path, Perm)
-            end
+    RawPermission = proplists:get_value("permission", Req:parse_qs()),
+    case parse_optional_permission(RawPermission) of
+        error ->
+            menelaus_util:reply_json(Req, <<"Malformed permission.">>, 400);
+        Perm ->
+            handle_get_users_with_domain(Req, DomainAtom, Path, Perm)
     end.
 
 handle_get_users_with_domain(Req, DomainAtom, Path, Permission) ->
@@ -1029,6 +1023,9 @@ list_to_rbac_atom(List) ->
     catch error:badarg ->
             '_unknown_'
     end.
+
+parse_optional_permission(undefined) -> no_check;
+parse_optional_permission(RawPermission) -> parse_permission(RawPermission).
 
 parse_permission(RawPermission) ->
     case string:tokens(RawPermission, "!") of
