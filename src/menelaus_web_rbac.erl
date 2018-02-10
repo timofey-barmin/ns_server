@@ -361,10 +361,12 @@ handle_get_user(Domain, UserId, Req) ->
             end
     end.
 
+filter_by_permission(no_check) ->
+    pipes:filter(fun (_) -> true end);
 filter_by_permission(Permission) ->
     pipes:filter(
-      fun ({{user, User}, _}) ->
-              allowed == menelaus_auth:check_permission(User, Permission)
+      fun ({{user, Identity}, _}) ->
+              menelaus_roles:is_allowed(Permission, Identity)
       end).
 
 filter_out_invalid_roles() ->

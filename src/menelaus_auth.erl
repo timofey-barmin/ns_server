@@ -35,8 +35,7 @@
          validate_request/1,
          verify_login_creds/2,
          verify_rest_auth/2,
-         verify_local_token/1,
-         check_permission/2]).
+         verify_local_token/1]).
 
 %% rpc from ns_couchdb node
 -export([authenticate/1,
