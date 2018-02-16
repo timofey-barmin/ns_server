@@ -65,17 +65,22 @@ executing_on_socket(Fun, Bucket) ->
     executing_on_socket(Fun, Bucket, []).
 
 executing_on_socket(Fun, Bucket, Options) ->
+    {ExecOptions, PoolOptions} =
+        lists:partition(fun ({abort_after, _}) -> true;
+                            (_) -> false
+                        end, Options),
+
     misc:executing_on_new_process(
       fun () ->
-              case take_socket(Bucket, Options) of
+              case take_socket(Bucket, PoolOptions) of
                   {ok, Sock} ->
                       Result = Fun(Sock),
-                      put_socket(Sock, Options),
+                      put_socket(Sock, PoolOptions),
                       Result;
                   Error ->
                       Error
               end
-      end).
+      end, ExecOptions).
 
 get_destination(Options) ->
     {ns_memcached, misc:canonical_proplist(Options)}.
