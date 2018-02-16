@@ -58,7 +58,9 @@ parse_params(Params) ->
       {inclusive_end, parse_bool(proplists:get_value("inclusive_end", Params), true)},
       {limit, Skip + Limit},
       {start_key, parse_key(proplists:get_value("startkey", Params))},
-      {end_key, parse_key(proplists:get_value("endkey", Params))}]}.
+      {end_key, parse_key(proplists:get_value("endkey", Params))},
+      {include_xattrs, parse_bool(proplists:get_value("include_xattrs", Params), false)},
+      {include_meta, parse_bool(proplists:get_value("include_meta", Params), false)}]}.
 
 handle_list(BucketId, Req) ->
     try parse_params(Req:parse_qs()) of
@@ -78,12 +80,19 @@ do_handle_list(Req, _Bucket, _Params, 0) ->
                 {reason, <<"could not get consistent vbucket map">>}]}, 503);
 do_handle_list(Req, Bucket, {Skip, Limit, Params}, N) ->
     NodeVBuckets = dict:to_list(vbucket_map_mirror:must_node_vbuckets_dict(Bucket)),
+    Permissions = get_xattrs_permissions(Bucket, Req),
 
-    case build_keys_heap(Bucket, NodeVBuckets, Params) of
+    case build_keys_heap(Bucket, NodeVBuckets,
+                         [{xattrs_permissions, Permissions}|Params]) of
         {ok, Heap} ->
             Heap1 = handle_skip(Heap, Skip),
-            menelaus_util:reply_json(Req,
-                                     {struct, [{rows, handle_limit(Heap1, Limit)}]});
+            Docs = handle_limit(Heap1, Limit),
+            Json =
+                case cluster_compat_mode:is_cluster_vulcan() of
+                    true -> [{struct, encode_doc(D)} || D <- Docs];
+                    false -> [{struct, encode_doc_pre_vulcan(D)} || D <- Docs]
+                end,
+            menelaus_util:reply_json(Req, {struct, [{rows, Json}]});
         {error, {memcached_error, not_my_vbucket}} ->
             timer:sleep(1000),
             do_handle_list(Req, Bucket, {Skip, Limit, Params}, N - 1);
@@ -158,19 +167,37 @@ do_handle_limit(Heap, Limit, R) ->
         false ->
             {[Min | Rest], Heap1} = couch_skew:out(fun heap_less/2, Heap),
             do_handle_limit(heap_insert(Heap1, Rest), Limit - 1,
-                            [encode_doc(Min) | R])
+                            [Min | R])
+    end.
+%% Pre vulcan compatible format
+encode_doc_pre_vulcan({Id, Doc}) ->
+    [{id, Id}] ++
+    case Doc of
+        undefined -> [];
+        {binary, V} -> [{doc, {struct, [{base64, base64:encode(V)}]}}];
+        {json, V} -> [{doc, {struct, [{json, mochijson2:decode(V)}]}}]
     end.
 
-encode_doc({Key, undefined}) ->
-    {struct, [{id, Key}]};
-encode_doc({Key, Value}) ->
-    Doc = case Value of
-              {binary, V} ->
-                  {base64, base64:encode(V)};
-              {json, V} ->
-                  {json, mochijson2:decode(V)}
-          end,
-    {struct, [{id, Key}, {doc, {struct, [Doc]}}]}.
+encode_doc(Doc) ->
+    [{id, proplists:get_value(id, Doc)}] ++
+    case proplists:get_value(doc, Doc) of
+        undefined -> [];
+        {binary, V} -> [{doc, {struct, [{base64, base64:encode(V)}]}}];
+        {json, V} -> [{doc, {struct, [{json, mochijson2:decode(V)}]}}]
+    end ++
+    case proplists:get_value(meta, Doc) of
+        undefined -> [];
+        {Rev, _MetaFlags} ->
+            {_, <<_CAS:64/big, Expiration:32/big, ItemFlags:32/big>>} = Rev,
+            [{meta, {struct, [{rev, couch_doc:rev_to_str(Rev)},
+                              {expiration, Expiration},
+                              {flags, ItemFlags}]}}]
+    end ++
+    case proplists:get_value(xattrs, Doc) of
+        undefined -> [];
+        XAttrs -> [{xattrs, {struct, XAttrs}}]
+    end ++
+    [{outdated, true} || proplists:get_bool(outdated, Doc)].
 
 do_get(BucketId, DocId, Options) ->
     BinaryBucketId = list_to_binary(BucketId),

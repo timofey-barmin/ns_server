@@ -24,7 +24,7 @@
 -export([bin/1, recv/2, recv/3, send/4, encode/3, quick_stats/4,
          quick_stats/5, quick_stats_append/3,
          decode_packet/1,
-         get_keys/4, get_xattrs/4]).
+         get_keys/3, get_xattrs/4]).
 
 -define(RECV_TIMEOUT, ns_config:get_timeout(memcached_recv, 120000)).
 -define(QUICK_STATS_RECV_TIMEOUT, ns_config:get_timeout(memcached_stats_recv, 180000)).
@@ -232,7 +232,10 @@ recv_data(Sock, NumBytes, Timeout) -> prim_inet:recv(Sock, NumBytes, Timeout).
           end_key :: binary(),
           inclusive_end :: boolean(),
           limit :: non_neg_integer(),
-          include_docs :: boolean()
+          include_docs :: boolean(),
+          include_meta :: boolean(),
+          include_xattrs :: boolean(),
+          xattrs_permissions :: [atom()]
          }).
 
 -record(heap_item, {
@@ -253,11 +256,6 @@ mk_heap_item(VBucket, Data) ->
 heap_item_from_rest(#heap_item{rest_keys = Rest} = Item) ->
     {First, Rest2} = decode_first_key(Rest),
     Item#heap_item{key = First, rest_keys = Rest2}.
-
-encode_get(Key, VBucket) ->
-    mc_binary:encode(?REQ_MAGIC,
-                     #mc_header{opcode = ?GET, vbucket = VBucket},
-                     #mc_entry{key = Key}).
 
 encode_get_keys(VBuckets, StartKey, Limit) ->
     [mc_binary:encode(?REQ_MAGIC,
@@ -340,12 +338,16 @@ fetch_more(Sock, TRef, Number, Params,
               end
       end, unused, [VBucket]).
 
-get_keys(Sock, VBuckets, Props, Timeout) ->
-    IncludeDocs = proplists:get_value(include_docs, Props),
+get_keys(Sock, VBuckets, Props) ->
+    IncludeDocs = proplists:get_bool(include_docs, Props),
     InclusiveEnd = proplists:get_value(inclusive_end, Props),
     Limit = proplists:get_value(limit, Props),
     StartKey0 = proplists:get_value(start_key, Props),
     EndKey = proplists:get_value(end_key, Props),
+    IsVulcan = cluster_compat_mode:is_cluster_vulcan(),
+    IncludeMeta = IsVulcan and proplists:get_bool(include_meta, Props),
+    IncludeXAttrs = IsVulcan and proplists:get_bool(include_xattrs, Props),
+    XAttrPermissions = proplists:get_value(xattrs_permissions, Props, []),
 
     StartKey = case StartKey0 of
                    undefined ->
@@ -358,27 +360,23 @@ get_keys(Sock, VBuckets, Props, Timeout) ->
                               inclusive_end = InclusiveEnd,
                               limit = Limit,
                               start_key = StartKey,
-                              end_key = EndKey},
+                              end_key = EndKey,
+                              include_meta = IncludeMeta,
+                              include_xattrs = IncludeXAttrs,
+                              xattrs_permissions = XAttrPermissions},
 
     Params1 = Params#get_keys_params{start_key = StartKey},
 
-    TRef = make_ref(),
-    Timer = erlang:send_after(Timeout, self(), TRef),
-
     try
-        do_get_keys(Sock, VBuckets, Params1, TRef)
+        do_get_keys(Sock, VBuckets, Params1)
     catch
         throw:Error ->
             Error
-    after
-        erlang:cancel_timer(Timer),
-        misc:flush(TRef)
     end.
 
-do_get_keys(Sock, VBuckets, Params, TRef) ->
+do_get_keys(Sock, VBuckets, Params) ->
     #get_keys_params{start_key = StartKey,
-                     limit = Limit,
-                     include_docs = IncludeDocs} = Params,
+                     limit = Limit} = Params,
 
     PrefetchLimit = 2 * (Limit div length(VBuckets) + 1),
     proc_lib:spawn_link(
@@ -386,7 +384,7 @@ do_get_keys(Sock, VBuckets, Params, TRef) ->
               ok = prim_inet:send(Sock,
                                   encode_get_keys(VBuckets, StartKey, PrefetchLimit))
       end),
-
+    TRef = make_ref(),
     Heap0 =
         get_keys_recv(
           Sock, TRef,
@@ -401,16 +399,7 @@ do_get_keys(Sock, VBuckets, Params, TRef) ->
 
     {KeysAndVBuckets, Heap1} = handle_limit(Heap0, Sock, TRef, PrefetchLimit, Params),
 
-    R = case IncludeDocs of
-            true ->
-                handle_include_docs(Sock, TRef, PrefetchLimit,
-                                    Params, KeysAndVBuckets, Heap1);
-            false ->
-                [{K, undefined} || {K, _VB} <- KeysAndVBuckets]
-        end,
-
-
-    {ok, R}.
+    {ok, get_values(Sock, TRef, PrefetchLimit, Params, KeysAndVBuckets, Heap1)}.
 
 heap_insert(Heap, Item) ->
     couch_skew:in(Item, fun heap_item_less/2, Heap).
@@ -462,33 +451,6 @@ handle_limit(Heap, Sock, TRef, FetchLimit,
                   end, []),
     {lists:reverse(Keys0), Heap1}.
 
-retrieve_values(Sock, TRef, KeysAndVBuckets) ->
-    proc_lib:spawn_link(
-      fun () ->
-              ok = prim_inet:send(Sock,
-                                  [encode_get(K, VB) || {K, VB} <- KeysAndVBuckets])
-      end),
-
-    {KVs, Missing} =
-        get_keys_recv(
-          Sock, TRef,
-          fun ({K, _VB}, Header, Entry, {AccKV, AccMissing}) ->
-                  #mc_header{status = Status} = Header,
-                  #mc_entry{data = Data} = Entry,
-
-                  case Status of
-                      ?SUCCESS ->
-                          {[{K, annotate_value(Data)} | AccKV], AccMissing};
-                      ?KEY_ENOENT ->
-                          {AccKV, AccMissing + 1};
-                      _ ->
-                          throw({memcached_error,
-                                 mc_client_binary:map_status(Status)})
-                  end
-          end, {[], 0}, KeysAndVBuckets),
-    {lists:reverse(KVs), Missing}.
-
-
 annotate_value(Value) ->
     case capi_crud:is_valid_json(Value) of
         true ->
@@ -503,17 +465,78 @@ annotate_value(Value) ->
             {binary, Value1}
     end.
 
-handle_include_docs(Sock, TRef, FetchLimit, Params, KeysAndVBuckets, Heap) ->
-    {KVs, Missing} = retrieve_values(Sock, TRef, KeysAndVBuckets),
-    case Missing =:= 0 of
-        true ->
-            KVs;
-        false ->
+get_values(Sock, TRef, FetchLimit, Params, KeysAndVBuckets, Heap) ->
+    #get_keys_params{include_docs = NeedDocs,
+                     include_meta = NeedMeta,
+                     include_xattrs = NeedXAttrs,
+                     xattrs_permissions = XAttrPermissions} = Params,
+
+    Values =
+        lists:foldr(
+            fun ({K, VB}, Acc) ->
+                try
+                    {Doc, CAS1} = maybe_collect_doc(Sock, K, VB, NeedDocs),
+                    {Meta, CAS2} = maybe_collect_meta(Sock, K, VB, NeedMeta),
+                    {XAtts, CAS3} = maybe_collect_xattrs(Sock, K, VB,
+                                                         NeedXAttrs,
+                                                         XAttrPermissions),
+                    IsOutdated = not valid_cas([CAS1, CAS2, CAS3]),
+                    NewRec = [{id, K}, {doc, Doc}, {meta, Meta},
+                              {xattrs, XAtts}, {outdated, IsOutdated}],
+                    [NewRec|Acc]
+                catch
+                    error:{memcached_error, key_enoent} -> Acc
+                end
+            end, [], KeysAndVBuckets),
+
+    Missing = length(KeysAndVBuckets) - length(Values),
+    case Missing of
+        0 -> Values;
+        _ ->
             {NewKeysAndVBuckets, NewHeap} =
                 handle_limit(Heap, Sock, TRef, FetchLimit,
                              Params#get_keys_params{limit=Missing}),
-            KVs ++ handle_include_docs(Sock, TRef, FetchLimit, Params,
-                                       NewKeysAndVBuckets, NewHeap)
+            Values ++ get_values(Sock, TRef, FetchLimit, Params,
+                                 NewKeysAndVBuckets, NewHeap)
+    end.
+
+valid_cas(CASs) ->
+    Defined = [CAS || CAS <- CASs, CAS =/= undefined],
+    length(lists:usort(Defined)) =< 1.
+
+maybe_collect_doc(_Sock, _Key, _VBucket, false) ->
+    {undefined, undefined};
+maybe_collect_doc(Sock, Key, VBucket, _) ->
+    GetRes = mc_client_binary:cmd(?GET, Sock,
+                                  undefined,undefined,
+                                  {#mc_header{vbucket = VBucket},
+                                  #mc_entry{key = Key}}),
+    case GetRes of
+        {ok, #mc_header{status = ?SUCCESS}, Entry, _} ->
+            #mc_entry{data = Data, cas = CAS} = Entry,
+            {annotate_value(Data), CAS};
+        {ok, #mc_header{status = Status}, _, _} ->
+            error({memcached_error, mc_client_binary:map_status(Status)})
+    end.
+
+maybe_collect_meta(_Sock, _Key, _VBucket, false) ->
+    {undefined, undefined};
+maybe_collect_meta(Sock, Key, VBucket, _) ->
+    case mc_client_binary:get_meta(Sock, Key, VBucket) of
+        {ok, Rev, CAS, MetaFlags} ->
+            {{Rev, MetaFlags}, CAS};
+        {memcached_error, Status, _} ->
+            error({memcached_error, mc_client_binary:map_status(Status)})
+    end.
+
+maybe_collect_xattrs(_Sock, _Key, _VBucket, false, _) ->
+    {undefined, undefined};
+maybe_collect_xattrs(Sock, Key, VBucket, _, Permissions) ->
+    case get_xattrs(Sock, Key, VBucket, Permissions) of
+        {ok, CAS, Values} ->
+            {Values, CAS};
+        {memcached_error, Status, _} ->
+            error({memcached_error, mc_client_binary:map_status(Status)})
     end.
 
 get_xattrs(_Sock, _DocId, _VBucket, []) -> {ok, undefined, []};

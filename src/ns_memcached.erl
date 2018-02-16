@@ -127,7 +127,8 @@
          wait_for_seqno_persistence/3,
          get_keys/3,
          config_validate/1,
-         config_reload/0
+         config_reload/0,
+         get_local_keys/3
         ]).
 
 %% for ns_memcached_sockets_pool, memcached_file_refresh only
@@ -611,11 +612,16 @@ do_handle_call({get_vbucket_high_seqno, VBucketId}, _From, State) ->
             undefined),
     {reply, Res, State};
 do_handle_call({get_keys, VBuckets, Params}, _From, State) ->
-    RV = mc_binary:get_keys(State#state.sock, VBuckets, Params, ?GET_KEYS_TIMEOUT),
+    RV = mc_binary:get_keys(State#state.sock, VBuckets, Params),
 
     case RV of
-        {ok, _}  ->
-            {reply, RV, State};
+        {ok, Values}  ->
+            %% If we receive this request it means we are in a compat mode
+            %% and requesting node might be of pre vulcan version so we need
+            %% return result in pre vulcan format. Hence result translation.
+            CompatibleValues = [{proplists:get_value(id, D),
+                                 proplists:get_value(doc, D)} || D <- Values],
+            {reply, {ok, CompatibleValues}, State};
         {memcached_error, _} ->
             %% we take special care to leave the socket in the sane state in
             %% case of expected memcached errors (think rebalance)
@@ -1601,26 +1607,40 @@ do_perform_checkpoint_commit_for_xdcr_loop(Sock, VBucketId, WaitedSeqno) ->
 
 get_keys(Bucket, NodeVBuckets, Params) ->
     try
-        {ok, do_get_keys(Bucket, NodeVBuckets, Params)}
+        {ok, misc:parallel_map(
+               fun ({Node, VBuckets}) ->
+                       Res =
+                           case cluster_compat_mode:is_cluster_vulcan() of
+                               true ->
+                                   rpc:call(Node, ?MODULE, get_local_keys,
+                                            [Bucket, VBuckets, Params]);
+                               false ->
+                                   try do_call({server(Bucket), Node},
+                                               {get_keys, VBuckets, Params},
+                                               infinity) of
+                                       unhandled -> {ok, []};
+                                       R -> R
+                                   catch
+                                       T:E -> {T, E}
+                                   end
+                           end,
+                       {Node, Res}
+               end, NodeVBuckets, ?GET_KEYS_OUTER_TIMEOUT)}
     catch
         exit:timeout ->
             {error, timeout}
     end.
 
-do_get_keys(Bucket, NodeVBuckets, Params) ->
-    misc:parallel_map(
-      fun ({Node, VBuckets}) ->
-              try do_call({server(Bucket), Node},
-                           {get_keys, VBuckets, Params}, infinity) of
-                  unhandled ->
-                      {Node, {ok, []}};
-                  R ->
-                      {Node, R}
-              catch
-                  T:E ->
-                      {Node, {T, E}}
-              end
-      end, NodeVBuckets, ?GET_KEYS_OUTER_TIMEOUT).
+get_local_keys(Bucket, VBuckets, Params) ->
+    try
+        perform_very_long_call(
+          fun (Sock) ->
+                  RV = mc_binary:get_keys(Sock, VBuckets, Params),
+                  {reply, RV}
+          end, Bucket, [xattrs, {abort_after, ?GET_KEYS_TIMEOUT}])
+    catch
+        exit:timeout -> {error, timeout}
+    end.
 
 -spec config_validate(binary()) -> ok | mc_error().
 config_validate(NewConfig) ->
