@@ -2449,3 +2449,14 @@ delay(0) ->
 delay(I) ->
     delay(I-1).
 -endif.
+
+duplicates(List) when is_list(List) ->
+    List -- lists:usort(List).
+
+-ifdef(EUNIT).
+no_duplicates_test() ->
+    ?assertEqual([],  duplicates([])),
+    ?assertEqual([],  duplicates([1])),
+    ?assertEqual([],  duplicates([1,2,3,"1"])),
+    ?assertEqual([1,2,2], duplicates([1,2,1,2,3,2])).
+-endif.
