@@ -1183,18 +1183,31 @@ compute_map_diff(NewMap, OldMap) ->
 %% it will be rethrown. Care is taken to propagate exits of 'parent'
 %% process to this worker process.
 executing_on_new_process(Body) ->
-    {trap_exit, TrapExit} = process_info(self(), trap_exit),
-    executing_on_new_process(TrapExit, Body).
+    executing_on_new_process(Body, []).
 
-executing_on_new_process(true, Body) ->
+executing_on_new_process(Body, Options) ->
+    {trap_exit, TrapExit} = process_info(self(), trap_exit),
+    executing_on_new_process(TrapExit, Body, Options).
+
+executing_on_new_process(true, Body, Options) ->
     %% If the caller had trap_exit set, we can't really make the execution
     %% interruptlible, after all it was, hopefully, a deliberate choice to set
     %% trap_exit, so we need to abide by it.
-    async:with(Body, fun async:wait/1);
-executing_on_new_process(false, Body) ->
+    A = async:start(Body),
+    {ok, TRef} = maybe_start_abort_timer(
+                   proplists:get_value(abort_after, Options), A),
+    try
+        async:wait(A)
+    after
+        timer:cancel(TRef),
+        async:abort(A)
+    end;
+executing_on_new_process(false, Body, Options) ->
     with_trap_exit(
       fun () ->
               A = async:start(Body),
+              {ok, TRef} = maybe_start_abort_timer(
+                             proplists:get_value(abort_after, Options), A),
               try
                   async:wait(A, [interruptible])
               catch
@@ -1204,9 +1217,15 @@ executing_on_new_process(false, Body) ->
                       %% will be processed by the with_trap_exit
                       self() ! Exit
               after
+                  timer:cancel(TRef),
                   async:abort(A)
               end
       end).
+
+maybe_start_abort_timer(undefined, _) ->
+    {ok, undefined};
+maybe_start_abort_timer(AbortAfter, A) ->
+    timer:apply_after(AbortAfter, async, abort, [A, timeout]).
 
 -ifdef(EUNIT).
 executing_on_new_process_test() ->
