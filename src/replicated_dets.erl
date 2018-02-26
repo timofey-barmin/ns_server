@@ -28,7 +28,8 @@
 
 -export([init/1, init_after_ack/1, handle_call/3, handle_info/2,
          get_id/1, get_value/1, find_doc/2, find_doc_rev/2, all_docs/1,
-         get_revision/1, set_revision/2, is_deleted/1, save_docs/2, handle_mass_update/3]).
+         get_revision/1, set_revision/2, is_deleted/1, save_docs/2,
+         handle_mass_update/3, on_replicate_in/2, on_replicate_out/2]).
 
 -record(state, {child_module :: atom(),
                 child_state :: term(),
@@ -245,6 +246,14 @@ save_docs(Docs, #state{name = TableName,
                   end, Docs),
     NewChildState = ChildModule:on_save(Docs, ChildState),
     {ok, State#state{child_state = NewChildState}}.
+
+on_replicate_in(Docs, #state{child_module = ChildModule,
+                             child_state = ChildState}) ->
+    ChildModule:on_replicate_in(Docs, ChildState).
+
+on_replicate_out(Docs,  #state{child_module = ChildModule,
+                               child_state = ChildState}) ->
+    ChildModule:on_replicate_out(Docs, ChildState).
 
 handle_call(suspend, {Pid, _} = From, #state{name = TableName} = State) ->
     MRef = erlang:monitor(process, Pid),
