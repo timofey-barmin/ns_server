@@ -28,7 +28,8 @@
 
 -export([init/1, init_after_ack/1, handle_call/3, handle_cast/2,
          handle_info/2, get_id/1, find_doc/2, find_doc_rev/2, all_docs/1,
-         get_revision/1, set_revision/2, is_deleted/1, save_docs/2]).
+         get_revision/1, set_revision/2, is_deleted/1, save_docs/2,
+         on_replicate_in/2, on_replicate_out/2]).
 
 -include("ns_common.hrl").
 -include("couch_db.hrl").
@@ -162,7 +163,7 @@ find_doc_rev(Id, State) ->
     end.
 
 all_docs(Pid) ->
-    ?make_producer(?yield(gen_server:call(Pid, get_all_docs, infinity))).
+    ?make_producer(?yield({batch, gen_server:call(Pid, get_all_docs, infinity)})).
 
 get_revision(#doc{rev = Rev}) ->
     Rev.
@@ -173,13 +174,22 @@ set_revision(Doc, NewRev) ->
 is_deleted(#doc{deleted = Deleted}) ->
     Deleted.
 
-save_docs([NewDoc], State) ->
+save_docs(Docs, State) ->
     try
-        {ok, do_save_doc(NewDoc, State)}
+        {ok, do_save_docs(Docs, State)}
     catch throw:{invalid_design_doc, _} = Error ->
             ?log_debug("Document validation failed: ~p", [Error]),
             {error, Error}
     end.
+
+do_save_docs(Docs, InitState) ->
+    lists:foldl(
+      fun (Doc, State) ->
+          do_save_doc(Doc, State)
+      end, InitState, Docs).
+
+on_replicate_in(Docs, _State) -> Docs.
+on_replicate_out(Docs, _State) -> Docs.
 
 handle_call({foreach_doc, Fun}, _From, #state{local_docs = Docs} = State) ->
     Res = [{Id, Fun(Doc)} || #doc{id = Id} = Doc <- Docs],

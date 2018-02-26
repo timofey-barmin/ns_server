@@ -102,6 +102,8 @@ loop(Module, GetNodes, StorageFrontend, RemoteNodes) ->
 
     loop(Module, GetNodes, StorageFrontend, NewRemoteNodes).
 
+replicate_changes_to_node(_Module, _StorageFrontend, _Node, {batch, []}) ->
+    ok;
 replicate_changes_to_node(_Module, StorageFrontend, Node, {batch, Docs}) ->
     CompressedBatch = misc:compress(Docs),
     ?log_debug("Sending batch of size ~p to ~p", [size(CompressedBatch), Node]),

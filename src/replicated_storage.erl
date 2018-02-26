@@ -115,7 +115,8 @@ handle_call({interactive_update, Doc}, _From,
                        [ns_config_log:sanitize(NewDoc, true)]),
             case Module:save_docs([NewDoc], ChildState) of
                 {ok, NewChildState} ->
-                    Replicator ! {replicate_change, NewDoc},
+                    ToReplicate = Module:on_replicate_out([NewDoc], ChildState),
+                    [Replicator ! {replicate_change, D} || D <- ToReplicate],
                     {reply, ok, State#state{child_state = NewChildState}};
                 {error, Error} ->
                     {reply, Error, State}
@@ -161,34 +162,31 @@ handle_call(Msg, From, #state{child_module = Module, child_state = ChildState} =
             {noreply, State#state{child_state = NewChildState}}
     end.
 
-handle_cast({replicated_batch, CompressedBatch}, #state{child_module = Module,
-                                                        child_state = ChildState} = State) ->
+handle_cast({replicated_batch, CompressedBatch}, State) ->
     ?log_debug("Applying replicated batch. Size: ~p", [size(CompressedBatch)]),
     Batch = misc:decompress(CompressedBatch),
-    DocsToWrite =
-        lists:filter(fun (Doc) ->
-                             should_be_written(Doc, Module, ChildState)
-                     end, Batch),
-    {ok, NewChildState} = Module:save_docs(DocsToWrite, ChildState),
-    {noreply, State#state{child_state = NewChildState}};
-handle_cast({replicated_update, Doc}, #state{child_module = Module,
-                                             child_state = ChildState} = State) ->
-    case should_be_written(Doc, Module, ChildState) of
-        true ->
-            ?log_debug("Writing replicated doc ~p",
-                       [ns_config_log:tag_user_data(Doc)]),
-            {ok, NewChildState} = Module:save_docs([Doc], ChildState),
-            {noreply, State#state{child_state = NewChildState}};
-        false ->
-            {noreply, State}
-    end;
+    {noreply, handle_replication_update(Batch, false, State)};
+handle_cast({replicated_update, Doc}, State) ->
+    {noreply, handle_replication_update([Doc], true, State)};
+
 handle_cast(Msg, #state{child_module = Module, child_state = ChildState} = State) ->
     {noreply, NewChildState} = Module:handle_cast(Msg, ChildState),
     {noreply, State#state{child_state = NewChildState}}.
 
 handle_info(replicate_newnodes_docs, #state{child_module = Module,
-                                            replicator = Replicator} = State) ->
-    Replicator ! {replicate_newnodes_docs, Module:all_docs(self())},
+                                            replicator = Replicator,
+                                            child_state = ChildState} = State) ->
+    Producer = Module:all_docs(self()),
+    Transducer =
+        ?make_transducer(
+          pipes:foreach(?producer(),
+                        fun ({batch, Docs}) ->
+                                ToReplicate = Module:on_replicate_out(
+                                                Docs,
+                                                ChildState),
+                                ?yield({batch, ToReplicate})
+                        end)),
+    Replicator ! {replicate_newnodes_docs, pipes:compose(Producer, Transducer)},
     {noreply, State};
 handle_info(Msg, #state{child_module = Module, child_state = ChildState} = State) ->
     {noreply, NewChildState} = Module:handle_info(Msg, ChildState),
@@ -196,6 +194,18 @@ handle_info(Msg, #state{child_module = Module, child_state = ChildState} = State
 
 terminate(_Reason, _State) ->
     ok.
+
+handle_replication_update(Docs, NeedLog,
+                          #state{child_module = Module,
+                                 child_state = ChildState} = State) ->
+    DocsToWrite =
+        lists:filter(fun (Doc) ->
+                             should_be_written(Doc, Module, ChildState)
+                     end, Module:on_replicate_in(Docs, ChildState)),
+    [?log_debug("Writing replicated doc ~p", [ns_config_log:tag_user_data(D)])
+        || NeedLog, D <- DocsToWrite],
+    {ok, NewChildState} = Module:save_docs(DocsToWrite, ChildState),
+    State#state{child_state = NewChildState}.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.

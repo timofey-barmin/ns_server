@@ -50,7 +50,8 @@
          cleanup_bucket_roles/1]).
 
 %% callbacks for replicated_dets
--export([init/1, on_save/2, on_empty/1, handle_call/4, handle_info/2]).
+-export([init/1, on_save/2, on_empty/1, handle_call/4, handle_info/2,
+         on_replicate_in/2, on_replicate_out/2]).
 
 -export([start_storage/0, start_replicator/0, start_auth_cache/0]).
 
@@ -160,6 +161,12 @@ handle_info({change_version, Key} = Msg, #state{base = Base} = State) ->
     Ver = ets:update_counter(versions_name(), Key, 1),
     gen_event:notify(user_storage_events, {Key, {Ver, Base}}),
     {noreply, State}.
+
+on_replicate_in(Docs, _State) ->
+    Docs.
+
+on_replicate_out(Docs, _State) ->
+    Docs.
 
 on_empty(_State) ->
     true = ets:delete_all_objects(versions_name()),
