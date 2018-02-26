@@ -34,7 +34,6 @@
          get_roles/1,
          user_exists/1,
          get_user_name/1,
-         upgrade_to_4_5/1,
          get_salt_and_mac/1,
          build_memcached_auth/1,
          build_memcached_auth_info/1,
@@ -42,12 +41,14 @@
          get_users_version/0,
          get_auth_version/0,
          empty_storage/0,
-         upgrade_to_50/2,
          config_upgrade/0,
          upgrade_status/0,
          get_passwordless/0,
          filter_out_invalid_roles/3,
-         cleanup_bucket_roles/1]).
+         cleanup_bucket_roles/1,
+         upgrade_to_4_5/1,
+         upgrade_to_50/2,
+         upgrade_to_vulcan/2]).
 
 %% callbacks for replicated_dets
 -export([init/1, on_save/2, on_empty/1, handle_call/4, handle_info/2]).
@@ -234,7 +235,8 @@ build_auth({_, CurrentAuth}, Password) ->
 
 build_memcached_auth(Password) ->
     [{MemcachedAuth}] = build_memcached_auth_info([{"x", Password}]),
-    proplists:delete(<<"n">>, MemcachedAuth).
+    Auth = proplists:delete(<<"n">>, MemcachedAuth),
+    [{last_modified, misc:timestamp()}|Auth].
 
 -spec store_user(rbac_identity(), rbac_user_name(), rbac_password(), [rbac_role()]) -> run_txn_return().
 store_user(Identity, Name, Password, Roles) ->
@@ -619,6 +621,15 @@ do_upgrade_to_50(Nodes, Repair) ->
               NewProps = lists:keystore(roles, 1, Props, {roles, ValidatedRoles}),
               ok = store_user_50_validated({LdapUser, external}, NewProps, same)
       end, LdapUsers).
+
+upgrade_to_vulcan(_Config, _Nodes) ->
+    replicated_dets:select_with_update(storage_name(), {auth, '_'}, 100,
+        fun ({auth, _}, Auth) ->
+                LastModifiedProps = [{last_modified, misc:timestamp()}],
+                NewAuth = misc:update_proplist(Auth, LastModifiedProps),
+                {update, NewAuth}
+        end),
+    ok.
 
 config_upgrade() ->
     [{delete, users_upgrade}, {delete, read_only_user_creds}].

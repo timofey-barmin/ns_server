@@ -128,7 +128,8 @@ jsonify_auth([AU | Users], AP, Buckets, RestCreds) ->
                    undefined ->
                        undefined;
                    {User, Auth} ->
-                       ?yield({json, {[{<<"n">>, list_to_binary(User)} | Auth]}}),
+                       Auth2 = proplists:delete(last_modified, Auth),
+                       ?yield({json, {[{<<"n">>, list_to_binary(User)} | Auth2]}}),
                        User
                end,
 
@@ -150,6 +151,7 @@ jsonify_auth([AU | Users], AP, Buckets, RestCreds) ->
            pipes:foreach(
              ?producer(),
              fun ({{auth, {UserName, _Type}}, Auth}) ->
+                     CleanAuth = proplists:delete(last_modified, Auth),
                      case UserName of
                          ClusterAdmin ->
                              TagCA = ns_config_log:tag_user_name(ClusterAdmin),
@@ -158,7 +160,7 @@ jsonify_auth([AU | Users], AP, Buckets, RestCreds) ->
                                           [TagCA]),
                              ok;
                          _ ->
-                             ?yield({json, {[{<<"n">>, list_to_binary(UserName)} | Auth]}})
+                             ?yield({json, {[{<<"n">>, list_to_binary(UserName)} | CleanAuth]}})
                      end
              end),
            ?yield(array_end),

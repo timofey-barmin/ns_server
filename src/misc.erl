@@ -2155,7 +2155,10 @@ time_to_epoch_float({_, _, _} = TS) ->
     timestamp_to_time(TS, microsecond) / 1000000;
 
 time_to_epoch_float(_) ->
-  undefined.
+    undefined.
+
+timestamp() ->
+    misc:timestamp_to_time(os:timestamp(), millisecond).
 
 %% Shortcut convert_time_unit/3. Always assumes that time to convert
 %% is in native units.
