@@ -34,6 +34,7 @@
          get_roles/1,
          user_exists/1,
          get_user_name/1,
+         get_password_change_timestamp/1,
          get_salt_and_mac/1,
          build_memcached_auth/1,
          build_memcached_auth_info/1,
@@ -454,6 +455,11 @@ get_user_name({_, Domain} = Identity) when Domain =:= local orelse Domain =:= ex
     proplists:get_value(name, get_user_props(Identity));
 get_user_name(_) ->
     undefined.
+
+-spec get_password_change_timestamp(rbac_identity()) -> Timestamp :: integer().
+get_password_change_timestamp(Identity) ->
+    Auth = replicated_dets:get(storage_name(), {auth, Identity}, []),
+    proplists:get_value(last_modified, Auth).
 
 collect_result(Port, Acc) ->
     receive

@@ -233,27 +233,31 @@ handle_get_roles(Req) ->
 get_user_json(Identity, Props, Passwordless) ->
     Roles = proplists:get_value(roles, Props, []),
     Name = proplists:get_value(name, Props),
-    get_user_json(Identity, Name, Passwordless, Roles).
+    PasswordChangeTime = menelaus_users:get_password_change_timestamp(Identity),
+    get_user_json(Identity, Name, Passwordless, Roles, PasswordChangeTime).
 
-get_user_json({Id, Domain}, Name, Passwordless, Roles) ->
-    UserJson = [{id, list_to_binary(Id)},
-                {domain, Domain},
-                {roles, [{role_to_json(Role)} || Role <- Roles]}],
-    UserJson1 =
-        case Name of
-            undefined ->
-                UserJson;
-            _ ->
-                [{name, list_to_binary(Name)} | UserJson]
-        end,
-    UserJson2 =
+get_user_json({Id, Domain}, Name, Passwordless, Roles, PasswordChangeTime) ->
+    PasswordJson =
         case Passwordless of
             false ->
-                UserJson1;
+                case PasswordChangeTime of
+                    undefined -> [];
+                    _ ->
+                        Timestamp = misc:time_to_timestamp(PasswordChangeTime,
+                                                           millisecond),
+                        Local = calendar:now_to_local_time(Timestamp),
+                        BinTime = menelaus_util:format_server_time(Local),
+                        [{password_change_date, BinTime}]
+                end;
             _ ->
-                [{passwordless, true} | UserJson1]
+                [{passwordless, true}]
         end,
-    {UserJson2}.
+
+    {[{id, list_to_binary(Id)},
+      {domain, Domain},
+      {roles, [{role_to_json(Role)} || Role <- Roles]}] ++
+     [{name, list_to_binary(Name)} || Name =/= undefined] ++
+     PasswordJson}.
 
 handle_get_users(Path, Req) ->
     assert_api_can_be_used(),
@@ -348,7 +352,7 @@ handle_get_users_45(Req) ->
                      Roles = proplists:get_value(roles, Props, []),
                      get_user_json({LdapUser, external},
                                    proplists:get_value(name, Props),
-                                   false, Roles)
+                                   false, Roles, undefined)
              end, Users),
     menelaus_util:reply_json(Req, Json).
 
@@ -633,7 +637,9 @@ get_user_json(Identity) ->
         menelaus_roles:filter_out_invalid_roles(
           menelaus_roles:get_roles(Identity), Definitions, AllPossibleValues),
     Name = menelaus_users:get_user_name(Identity),
-    get_user_json(Identity, Name, lists:member(Identity, Passwordless), Roles).
+    PasswordChangeTs = menelaus_users:get_password_change_timestamp(Identity),
+    get_user_json(Identity, Name, lists:member(Identity, Passwordless), Roles,
+                  PasswordChangeTs).
 
 parse_until(Str, Delimeters) ->
     lists:splitwith(fun (Char) ->
