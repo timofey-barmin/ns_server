@@ -15,7 +15,9 @@
 %%
 -module(ns_error_messages).
 
+-include("ns_common.hrl").
 -include("cut.hrl").
+-include_lib("eunit/include/eunit.hrl").
 
 -export([decode_json_response_error/3,
          connection_error_message/3,
@@ -29,7 +31,8 @@
          topology_limitation_error/1,
          cert_validation_error_message/1,
          reload_node_certificate_error/1,
-         node_certificate_warning/1]).
+         node_certificate_warning/1,
+         unknown_services_error/1]).
 
 -spec connection_error_message(term(), string(), string() | integer()) -> binary() | undefined.
 connection_error_message({Error, _}, Host, Port) ->
@@ -170,6 +173,35 @@ sort_services(Services) ->
                    W1 =< W2
                end,
     lists:usort(OrderFun, Services).
+
+unknown_services_error(Services) ->
+    KnownServicesAtoms = ns_cluster_membership:supported_services_for_version(
+                           ?LATEST_VERSION_NUM),
+    KnownServices = [erlang:atom_to_list(S) || S <- KnownServicesAtoms],
+    UnknownServices = lists:usort(Services) -- KnownServices,
+    %% we can't use services_to_iolist for unknown services
+    UnknownStr = misc:intersperse(UnknownServices, ", "),
+    UnavailableServices = [list_to_atom(S) || S <- Services -- UnknownServices],
+    UnavailableStr = services_to_iolist(UnavailableServices),
+    Str1 = [io_lib:format("Not available services: ~s",
+                          [UnavailableStr]) || UnavailableServices =/= []],
+    Str2 = [io_lib:format("Unknown services: ~s",
+                          [UnknownStr]) || UnknownServices =/= []],
+    iolist_to_binary(misc:intersperse(Str1 ++ Str2, " ")).
+
+-ifdef(EUNIT).
+
+unknown_services_error_test() ->
+    ?assertEqual(<<"Unknown services: unknown1, unknown2">>,
+                 unknown_services_error(["unknown1", "unknown2"])),
+    ?assertEqual(<<"Not available services: query, analytics">>,
+                 unknown_services_error(["n1ql", "cbas"])),
+    ?assertEqual(<<"Not available services: query, analytics "
+                   "Unknown services: unknown1, unknown2">>,
+                 unknown_services_error(["unknown1", "n1ql",
+                                         "unknown2", "cbas"])).
+
+-endif.
 
 topology_limitation_error(Combinations) ->
     CombinationsStr = misc:intersperse([[$", services_to_iolist(C), $"] ||

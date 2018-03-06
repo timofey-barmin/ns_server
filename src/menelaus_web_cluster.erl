@@ -160,15 +160,15 @@ handle_join(Req) ->
     end.
 
 parse_validate_services_list(ServicesList) ->
-    KnownServices = ns_cluster_membership:supported_services(),
-    ServicePairs = [{erlang:atom_to_list(S), S} || S <- KnownServices],
-    ServiceStrings = string:tokens(ServicesList, ","),
-    FoundServices = [{SN, lists:keyfind(SN, 1, ServicePairs)} || SN <- ServiceStrings],
+    SupportedServices = ns_cluster_membership:supported_services(),
+    ServicePairs = [{erlang:atom_to_list(S), S} || S <- SupportedServices],
+    ServiceStrings = [misc:trim(S) || S <- string:tokens(ServicesList, ",")],
+    FoundServices = [{SN, lists:keyfind(SN, 1, ServicePairs)}
+                        || SN <- ServiceStrings],
     UnknownServices = [SN || {SN, false} <- FoundServices],
     case UnknownServices of
         [_|_] ->
-            Msg = io_lib:format("Unknown services: ~p", [UnknownServices]),
-            {error, iolist_to_binary(Msg)};
+            {error, ns_error_messages:unknown_services_error(UnknownServices)};
         [] ->
             RV = lists:usort([S || {_, {_, S}} <- FoundServices]),
             case RV of
