@@ -24,6 +24,7 @@
 %% callbacks
 -export([init/0, filter_event/1, handle_event/2, producer/1, refresh/0]).
 
+-include("cut.hrl").
 -include("ns_common.hrl").
 -include("pipes.hrl").
 
@@ -67,11 +68,12 @@ sync() ->
 
 init() ->
     Config = ns_config:get(),
+    ConfigGetProp = ns_config:search_node_prop(Config, memcached, _),
     #state{buckets = ns_bucket:get_bucket_names(ns_bucket:get_buckets(Config)),
            param_values =
                menelaus_roles:calculate_possible_param_values(ns_bucket:get_buckets(Config)),
-           users = [ns_config:search_node_prop(Config, memcached, admin_user) |
-                    ns_config:search_node_prop(Config, memcached, other_users, [])],
+           users = [{admin, ConfigGetProp(admin_user)}] ++
+                   [{user, U} || U <- ConfigGetProp(other_users)],
            roles = menelaus_roles:get_definitions(Config)}.
 
 filter_event({buckets, _V}) ->
@@ -125,7 +127,7 @@ generate_45(#state{buckets = Buckets,
                    roles = RoleDefinitions,
                    users = Users}) ->
     Json =
-        {[memcached_admin_json(U, Buckets) || U <-Users] ++
+        {[memcached_admin_json(U, Buckets) || U <- Users] ++
              generate_json_45(Buckets, ParamValues, RoleDefinitions)},
     menelaus_util:encode_json(Json).
 
@@ -178,8 +180,11 @@ jsonify_user({UserName, Domain}, [{global, GlobalPermissions} | BucketPermission
     Global = {privileges, GlobalPermissions},
     {list_to_binary(UserName), {[Buckets, Global, {domain, Domain}]}}.
 
-memcached_admin_json(AU, Buckets) ->
-    jsonify_user({AU, local}, [{global, [all]} | [{Name, [all]} || Name <- Buckets]]).
+memcached_admin_json({admin, AU}, _Buckets) ->
+    jsonify_user({AU, local}, [{global, [all]}, {"*", [all]}]);
+memcached_admin_json({user, AU}, Buckets) ->
+    jsonify_user({AU, local}, [{global, [all]}] ++
+                              [{Name, [all]} || Name <- Buckets]).
 
 generate_json_45(Buckets, ParamValues, RoleDefinitions) ->
     RolesDict = dict:new(),
