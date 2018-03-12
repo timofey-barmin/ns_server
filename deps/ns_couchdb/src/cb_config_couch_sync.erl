@@ -42,13 +42,31 @@ init([]) ->
 get_db_and_ix_paths() ->
     DbPath = couch_config:get("couchdb", "database_dir"),
     IxPath = couch_config:get("couchdb", "view_index_dir", DbPath),
+    DefaultDbPath = couch_config:get("couchdb", "default_database_dir",
+                                     DbPath),
+    DefaultIxPath = couch_config:get("couchdb", "default_view_index_dir",
+                                     IxPath),
     [{db_path, filename:join([DbPath])},
-     {index_path, filename:join([IxPath])}].
+     {index_path, filename:join([IxPath])},
+     {default_db_path, filename:join([DefaultDbPath])},
+     {default_index_path, filename:join([DefaultIxPath])}].
 
 -spec set_db_and_ix_paths(DbPath :: string(), IxPath :: string()) -> ok.
 set_db_and_ix_paths(DbPath0, IxPath0) ->
     DbPath = filename:join([DbPath0]),
     IxPath = filename:join([IxPath0]),
+    %% Saving orig paths to be able to figure out later if the node uses
+    %% default paths or not (we need it to give users a warning if they add
+    %% node with default paths via node with not default paths),
+    case couch_config:get("couchdb", "default_database_dir") of
+        undefined ->
+            OrigDbPath = couch_config:get("couchdb", "database_dir"),
+            OrigIxPath = couch_config:get("couchdb", "view_index_dir",
+                                          OrigDbPath),
+            couch_config:set("couchdb", "default_database_dir", OrigDbPath),
+            couch_config:set("couchdb", "default_view_index_dir", OrigIxPath);
+        _ -> ok
+    end,
 
     couch_config:set("couchdb", "database_dir", DbPath),
     couch_config:set("couchdb", "view_index_dir", IxPath).

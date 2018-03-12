@@ -131,8 +131,8 @@ setup_disk_storage_conf(DbPath, IxPath, CBASDirs) ->
     end.
 
 prepare_db_ix_dirs(NewDbDir, NewIxDir) ->
-    [{db_path, CurrentDbDir},
-     {index_path, CurrentIxDir}] = lists:sort(ns_couchdb_api:get_db_and_ix_paths()),
+    {ok, CurrentDbDir} = this_node_dbdir(),
+    {ok, CurrentIxDir} = this_node_ixdir(),
 
     case NewDbDir =/= CurrentDbDir orelse NewIxDir =/= CurrentIxDir of
         true ->
@@ -169,8 +169,7 @@ update_db_ix_dirs(ok, NewDbDir, NewIxDir) ->
              [NewDbDir, NewIxDir]),
 
     ns_couchdb_api:set_db_and_ix_paths(NewDbDir, NewIxDir),
-    setup_db_and_ix_paths([{db_path, NewDbDir},
-                           {index_path, NewIxDir}]),
+    setup_db_and_ix_paths(ns_couchdb_api:get_db_and_ix_paths()),
     restart.
 
 prepare_cbas_dirs(CBASDirs) ->
@@ -240,8 +239,18 @@ storage_conf_from_node_status(Node, NodeStatus) ->
     HDDInfo = case proplists:get_value(db_path, StorageConf) of
                   undefined -> [];
                   DBDir ->
+                      DefaultDBDir = proplists:get_value(default_db_path,
+                                                         StorageConf,
+                                                         DBDir),
+                      IxDir = proplists:get_value(index_path, StorageConf,
+                                                  DBDir),
+                      DefaultIxDir = proplists:get_value(default_index_path,
+                                                         StorageConf,
+                                                         IxDir),
                       [{path, DBDir},
-                       {index_path, proplists:get_value(index_path, StorageConf, DBDir)},
+                       {default_path, DefaultDBDir},
+                       {index_path, IxDir},
+                       {default_index_path, DefaultIxDir},
                        {cbas_dirs, node_cbas_dirs(ns_config:latest(), Node)},
                        {quotaMb, none},
                        {state, ok}]
