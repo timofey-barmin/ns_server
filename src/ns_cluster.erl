@@ -50,8 +50,8 @@
          shun/1,
          start_link/0]).
 
--export([add_node_to_group/5,
-         engage_cluster/1, complete_join/1,
+-export([add_node_to_group/6,
+         engage_cluster/2, complete_join/2,
          check_host_connectivity/1, change_address/1,
          enforce_topology_limitation/1,
          rename_marker_path/0,
@@ -74,9 +74,10 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-add_node_to_group(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
-    RV = gen_server:call(?MODULE, {add_node_to_group, RemoteAddr, RestPort, Auth, GroupUUID, Services},
-                         ?ADD_NODE_TIMEOUT),
+add_node_to_group(RemoteAddr, RestPort, Auth, GroupUUID, Services, Settings) ->
+    Msg = {add_node_to_group, RemoteAddr, RestPort, Auth, GroupUUID, Services,
+           Settings},
+    RV = gen_server:call(?MODULE, Msg, ?ADD_NODE_TIMEOUT),
     case RV of
         {error, _What, Message, _Nested} ->
             ?cluster_log(?NODE_JOIN_FAILED, "Failed to add node ~s:~w to cluster. ~s",
@@ -117,8 +118,8 @@ engage_cluster_not_to_self(NodeKVList) ->
 call_engage_cluster(NodeKVList) ->
     gen_server:call(?MODULE, {engage_cluster, NodeKVList}, ?ENGAGE_TIMEOUT).
 
-complete_join(NodeKVList) ->
-    gen_server:call(?MODULE, {complete_join, NodeKVList}, ?COMPLETE_TIMEOUT).
+complete_join(NodeKVList, Req) ->
+    gen_server:call(?MODULE, {complete_join, NodeKVList, Req}, ?COMPLETE_TIMEOUT).
 
 -spec change_address(string()) -> ok
                                       | {cannot_resolve, inet:posix()}
@@ -170,9 +171,10 @@ sanitize_node_info(NodeKVList) ->
               continue
       end, NodeKVList).
 
-handle_call({add_node_to_group, RemoteAddr, RestPort, Auth, GroupUUID, Services}, _From, State) ->
+handle_call({add_node_to_group, RemoteAddr, RestPort, Auth, GroupUUID, Services,
+             Settings}, _From, State) ->
     ?cluster_debug("handling add_node(~p, ~p, ~p, ..)", [RemoteAddr, RestPort, GroupUUID]),
-    RV = do_add_node(RemoteAddr, RestPort, Auth, GroupUUID, Services),
+    RV = do_add_node(RemoteAddr, RestPort, Auth, GroupUUID, Services, Settings),
     ?cluster_debug("add_node(~p, ~p, ~p, ..) -> ~p", [RemoteAddr, RestPort, GroupUUID, RV]),
     {reply, RV, State};
 
@@ -182,9 +184,9 @@ handle_call({engage_cluster, NodeKVList}, _From, State) ->
     ?cluster_debug("engage_cluster(..) -> ~p", [RV]),
     {reply, RV, State};
 
-handle_call({complete_join, NodeKVList}, _From, State) ->
+handle_call({complete_join, NodeKVList, Req}, _From, State) ->
     ?cluster_debug("handling complete_join(~p)", [sanitize_node_info(NodeKVList)]),
-    RV = do_complete_join(NodeKVList),
+    RV = do_complete_join(NodeKVList, Req),
     ?cluster_debug("complete_join(~p) -> ~p", [sanitize_node_info(NodeKVList), RV]),
 
     case RV of
@@ -484,11 +486,11 @@ check_add_possible(Body) ->
             Body()
     end.
 
-do_add_node(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
+do_add_node(RemoteAddr, RestPort, Auth, GroupUUID, Services, Settings) ->
     check_add_possible(
       fun () ->
               do_add_node_allowed(RemoteAddr, RestPort, Auth,
-                                  GroupUUID, Services)
+                                  GroupUUID, Services, Settings)
       end).
 
 should_change_address() ->
@@ -496,7 +498,8 @@ should_change_address() ->
     ns_node_disco:nodes_wanted() =:= [node()] andalso
         not dist_manager:using_user_supplied_address().
 
-do_add_node_allowed(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
+do_add_node_allowed(RemoteAddr, RestPort, Auth, GroupUUID, Services,
+                    Settings) ->
     case check_host_connectivity(RemoteAddr) of
         {ok, MyIP} ->
             R = case should_change_address() of
@@ -518,7 +521,8 @@ do_add_node_allowed(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
             case R of
                 ok ->
                     do_add_node_with_connectivity(RemoteAddr, RestPort, Auth,
-                                                  GroupUUID, Services);
+                                                  GroupUUID, Services,
+                                                  Settings);
                 {address_save_failed, Error} = Nested ->
                     Msg = io_lib:format("Could not save address after rename: ~p",
                                         [Error]),
@@ -527,12 +531,13 @@ do_add_node_allowed(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
         X -> X
     end.
 
-do_add_node_with_connectivity(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
+do_add_node_with_connectivity(RemoteAddr, RestPort, Auth, GroupUUID, Services,
+                              Settings) ->
+
     {struct, NodeInfo} = menelaus_web_node:build_full_node_info(node(),
                                                                 misc:localhost()),
     Props = [{<<"requestedTargetNodeHostname">>, list_to_binary(RemoteAddr)},
-             {<<"requestedServices">>, Services}]
-        ++ NodeInfo,
+             {<<"requestedServices">>, Services}] ++ NodeInfo,
 
     Props1 =
         case ns_server_cert:cluster_ca() of
@@ -564,7 +569,7 @@ do_add_node_with_connectivity(RemoteAddr, RestPort, Auth, GroupUUID, Services) -
     case ExtendedRV of
         {ok, {struct, NodeKVList}} ->
             try
-                do_add_node_engaged(NodeKVList, Auth, GroupUUID, Services)
+                do_add_node_engaged(NodeKVList, Auth, GroupUUID, Services, Settings)
             catch
                 exit:{unexpected_json, _Where, _Field} = Exc ->
                     JsonMsg = ns_error_messages:engage_cluster_json_error(Exc),
@@ -644,7 +649,7 @@ verify_otp_connectivity(OtpNode) ->
             end
     end.
 
-do_add_node_engaged(NodeKVList, Auth, GroupUUID, Services) ->
+do_add_node_engaged(NodeKVList, Auth, GroupUUID, Services, Settings) ->
     OtpNode = expect_json_property_atom(<<"otpNode">>, NodeKVList),
     RV = verify_otp_connectivity(OtpNode),
     case RV of
@@ -656,7 +661,7 @@ do_add_node_engaged(NodeKVList, Auth, GroupUUID, Services) ->
                     %% services from NodeKVList
                     node_add_transaction(OtpNode, GroupUUID, Services,
                                          fun () ->
-                                                 do_add_node_engaged_inner(NodeKVList, OtpNode, Auth, Services)
+                                                 do_add_node_engaged_inner(NodeKVList, OtpNode, Auth, Services, Settings)
                                          end);
                 Error -> Error
             end;
@@ -684,15 +689,18 @@ check_can_add_node(NodeKVList) ->
                   {incompatible_cluster_version, MyCompatVersion, JoineeClusterCompatVersion}}
     end.
 
-do_add_node_engaged_inner(NodeKVList, OtpNode, Auth, Services) ->
+do_add_node_engaged_inner(NodeKVList, OtpNode, Auth, Services, Settings) ->
     HostnameRaw = expect_json_property_list(<<"hostname">>, NodeKVList),
     {Hostname0, Port} = misc:split_host_port(HostnameRaw, "8091"),
 
     {struct, MyNodeKVList} = menelaus_web_node:build_full_node_info(node(),
                                                                     misc:localhost()),
+    RequestedSettings =
+        [{<<"requestedSettings">>, {struct, Settings}} || Settings =/= []],
+
     Struct = {struct, [{<<"targetNode">>, OtpNode},
                        {<<"requestedServices">>, Services}
-                       | MyNodeKVList]},
+                       | MyNodeKVList] ++ RequestedSettings},
 
     ?cluster_debug("Posting the following to complete_join on ~p:~n~p",
                    [HostnameRaw, sanitize_node_info(Struct)]),
@@ -1022,12 +1030,16 @@ check_can_join_to(NodeKVList, Services) ->
         Error -> Error
     end.
 
--spec do_complete_join([{binary(), term()}]) -> {ok, ok} | {error, atom(), binary(), term()}.
-do_complete_join(NodeKVList) ->
+-spec do_complete_join([{binary(), term()}], mochiweb_request()) ->
+    {ok, ok} | {error, atom(), binary(), term()}.
+do_complete_join(NodeKVList, Req) ->
     try
         OtpNode = expect_json_property_atom(<<"otpNode">>, NodeKVList),
         OtpCookie = expect_json_property_atom(<<"otpCookie">>, NodeKVList),
         MyNode = expect_json_property_atom(<<"targetNode">>, NodeKVList),
+        {struct, SettingsBin} = proplists:get_value(<<"requestedSettings">>,
+                                                    NodeKVList, {struct, []}),
+        Settings = [{binary_to_list(K), V} || {K, V} <- SettingsBin],
 
         {ok, Services} = get_requested_services(NodeKVList),
         case check_can_join_to(NodeKVList, Services) of
@@ -1037,7 +1049,7 @@ do_complete_join(NodeKVList) ->
                         {error, join_race_detected,
                          <<"Node is already part of cluster.">>, system_not_joinable};
                     true ->
-                        perform_actual_join(OtpNode, OtpCookie)
+                        perform_actual_join(OtpNode, OtpCookie, Settings, Req)
                 end;
             Error -> Error
         end
@@ -1047,8 +1059,7 @@ do_complete_join(NodeKVList) ->
              Exc}
     end.
 
-
-perform_actual_join(RemoteNode, NewCookie) ->
+perform_actual_join(RemoteNode, NewCookie, Settings, Req) ->
     ?cluster_log(0002, "Node ~p is joining cluster via node ~p.",
                  [node(), RemoteNode]),
     %% let ns_memcached know that we don't need to preserve data at all
@@ -1126,8 +1137,24 @@ perform_actual_join(RemoteNode, NewCookie) ->
                        E};
                   {ok, _} ->
                       misc:remove_marker(start_marker_path()),
+                      case menelaus_web_node:apply_node_settings(Req, node(),
+                                                                 Settings) of
+                          ok -> ok;
+                          restart ->
+                              %% performing required restart from
+                              %% successfull path change
+                              {ok, _} =
+                                  ns_server_cluster_sup:restart_ns_server(),
+                              ok;
+                          {error, Msgs} = ErrorTerm ->
+                              ErrorMsg = misc:intersperse(Msgs, ". "),
+                              {error, settings_applying_failed,
+                               iolist_to_binary(ErrorMsg), ErrorTerm}
+                      end,
                       Status
               end,
+
+
 
     case Status2 of
         {ok, _} ->

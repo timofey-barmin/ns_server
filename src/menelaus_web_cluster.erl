@@ -127,7 +127,7 @@ handle_engage_cluster2(Req) ->
 handle_complete_join(Req) ->
     {struct, NodeKVList} = mochijson2:decode(Req:recv_body()),
     erlang:process_flag(trap_exit, true),
-    case ns_cluster:complete_join(NodeKVList) of
+    case ns_cluster:complete_join(NodeKVList, Req) of
         {ok, _} ->
             reply_json(Req, [], 200);
         {error, _What, Message, _Nested} ->
@@ -248,6 +248,24 @@ parse_join_cluster_params(Params, ThisIsJoin) ->
                        end
                end,
 
+    Path = proplists:get_value("path", Params),
+    IndexPath = proplists:get_value("index_path", Params),
+    CBASPaths = proplists:get_all_values("cbas_path", Params),
+    Settings = [{path, Path}            || Path =/= undefined] ++
+               [{index_path, IndexPath} || IndexPath =/= undefined] ++
+               [{cbas_path, P}          || P <- CBASPaths],
+
+    SettingsErrors =
+        case Settings == [] orelse cluster_compat_mode:is_cluster_vulcan() of
+            true -> [];
+            false ->
+                M = io_lib:format("Cluster of version ~p does not support "
+                                  "parameters: ~p",
+                                  [cluster_compat_mode:get_compat_version(),
+                                   [S || {S, _} <- Settings]]),
+                [iolist_to_binary(M)]
+        end,
+
     BasePList = [{user, OtherUser},
                  {password, OtherPswd}],
 
@@ -264,19 +282,16 @@ parse_join_cluster_params(Params, ThisIsJoin) ->
         end,
 
     Errors = MissingFieldErrors ++ VersionErrors ++ HostnameError ++
-        case Services of
-            {error, ServicesError} ->
-                [ServicesError];
-            _ ->
-                []
-        end,
+             SettingsErrors ++ [E || {error, E} <- [Services]],
+
     case Errors of
         [] ->
             {ok, ServicesList} = Services,
             {Host, Port} = ParsedHostnameRV,
             {ok, [{services, ServicesList},
                   {host, Host},
-                  {port, Port}
+                  {port, Port},
+                  {settings, Settings}
                   | BasePList]};
         _ ->
             {errors, Errors}
@@ -568,11 +583,14 @@ do_handle_add_node(Req, GroupUUID) ->
             Hostname = proplists:get_value(host, KV),
             Port = proplists:get_value(port, KV),
             Services = proplists:get_value(services, KV),
+            Settings = proplists:get_value(settings, KV),
+
             case ns_cluster:add_node_to_group(
                    Hostname, Port,
                    {User, Password},
                    GroupUUID,
-                   Services) of
+                   Services,
+                   Settings) of
                 {ok, OtpNode} ->
                     ns_audit:add_node(Req, Hostname, Port, User, GroupUUID, Services, OtpNode),
                     reply_json(Req, {struct, [{otpNode, OtpNode}]}, 200);
