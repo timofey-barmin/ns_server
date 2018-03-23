@@ -18,6 +18,7 @@
 -behaviour(gen_server).
 
 -include("ns_common.hrl").
+-include("cut.hrl").
 
 -define(UNUSED_NODE_JOIN_REQUEST, 2).
 -define(NODE_JOINED, 3).
@@ -50,7 +51,7 @@
          shun/1,
          start_link/0]).
 
--export([add_node_to_group/5,
+-export([add_node_to_group/6,
          engage_cluster/1, complete_join/1,
          check_host_connectivity/1, change_address/1,
          enforce_topology_limitation/1,
@@ -74,9 +75,10 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-add_node_to_group(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
-    RV = gen_server:call(?MODULE, {add_node_to_group, RemoteAddr, RestPort, Auth, GroupUUID, Services},
-                         ?ADD_NODE_TIMEOUT),
+add_node_to_group(RemoteAddr, RestPort, Auth, GroupUUID, Services, Settings) ->
+    Msg = {add_node_to_group, RemoteAddr, RestPort, Auth, GroupUUID, Services,
+           Settings},
+    RV = gen_server:call(?MODULE, Msg, ?ADD_NODE_TIMEOUT),
     case RV of
         {error, _What, Message, _Nested} ->
             ?cluster_log(?NODE_JOIN_FAILED, "Failed to add node ~s:~w to cluster. ~s",
@@ -170,9 +172,10 @@ sanitize_node_info(NodeKVList) ->
               continue
       end, NodeKVList).
 
-handle_call({add_node_to_group, RemoteAddr, RestPort, Auth, GroupUUID, Services}, _From, State) ->
+handle_call({add_node_to_group, RemoteAddr, RestPort, Auth, GroupUUID, Services,
+             Settings}, _From, State) ->
     ?cluster_debug("handling add_node(~p, ~p, ~p, ..)", [RemoteAddr, RestPort, GroupUUID]),
-    RV = do_add_node(RemoteAddr, RestPort, Auth, GroupUUID, Services),
+    RV = do_add_node(RemoteAddr, RestPort, Auth, GroupUUID, Services, Settings),
     ?cluster_debug("add_node(~p, ~p, ~p, ..) -> ~p", [RemoteAddr, RestPort, GroupUUID, RV]),
     {reply, RV, State};
 
@@ -484,11 +487,11 @@ check_add_possible(Body) ->
             Body()
     end.
 
-do_add_node(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
+do_add_node(RemoteAddr, RestPort, Auth, GroupUUID, Services, Settings) ->
     check_add_possible(
       fun () ->
               do_add_node_allowed(RemoteAddr, RestPort, Auth,
-                                  GroupUUID, Services)
+                                  GroupUUID, Services, Settings)
       end).
 
 should_change_address() ->
@@ -496,7 +499,8 @@ should_change_address() ->
     ns_node_disco:nodes_wanted() =:= [node()] andalso
         not dist_manager:using_user_supplied_address().
 
-do_add_node_allowed(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
+do_add_node_allowed(RemoteAddr, RestPort, Auth, GroupUUID, Services,
+                    Settings) ->
     case check_host_connectivity(RemoteAddr) of
         {ok, MyIP} ->
             R = case should_change_address() of
@@ -518,7 +522,8 @@ do_add_node_allowed(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
             case R of
                 ok ->
                     do_add_node_with_connectivity(RemoteAddr, RestPort, Auth,
-                                                  GroupUUID, Services);
+                                                  GroupUUID, Services,
+                                                  Settings);
                 {address_save_failed, Error} = Nested ->
                     Msg = io_lib:format("Could not save address after rename: ~p",
                                         [Error]),
@@ -527,7 +532,39 @@ do_add_node_allowed(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
         X -> X
     end.
 
-do_add_node_with_connectivity(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
+
+do_add_node_with_connectivity(RemoteAddr, RestPort, Auth, GroupUUID, Services,
+                              []) ->
+    do_add_node_with_settings(RemoteAddr, RestPort, Auth, GroupUUID, Services);
+do_add_node_with_connectivity(RemoteAddr, RestPort, Auth, GroupUUID, Services,
+                              Settings) ->
+    Res = menelaus_rest:json_request_hilevel(
+            post,
+            {RemoteAddr, RestPort,
+             "/nodes/self/controller/settings",
+             "application/x-www-form-urlencoded",
+             mochiweb_util:urlencode(Settings)},
+            Auth),
+    PrefixMsg = ?cut(iolist_to_binary(["Applying settings failed. ", _])),
+    case Res of
+        {ok, _} ->
+            do_add_node_with_settings(RemoteAddr, RestPort, Auth, GroupUUID,
+                                      Services);
+        {client_error, {struct, [{<<"error">>, Message}]}} = JSONErr
+		when is_binary(Message) ->
+            {error, apply_settings, PrefixMsg(Message), JSONErr};
+        {client_error, [Message]} = JSONErr
+		when is_binary(Message) ->
+            {error, apply_settings, PrefixMsg(Message), JSONErr};
+        {client_error, _} = JSONErr ->
+            Msg = ns_error_messages:engage_cluster_json_error(undefined),
+            {error, apply_settings, PrefixMsg(Msg), JSONErr};
+        {error, _What, Msg, _Nested} = E ->
+            {error, apply_settings, PrefixMsg(Msg), E}
+    end.
+
+do_add_node_with_settings(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
+
     {struct, NodeInfo} = menelaus_web_node:build_full_node_info(node(),
                                                                 misc:localhost()),
     Props = [{<<"requestedTargetNodeHostname">>, list_to_binary(RemoteAddr)},

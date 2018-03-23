@@ -58,6 +58,10 @@ rest_request(Method, URL, Headers, MimeType, Body, Auth, HTTPOptions) ->
     lhttpc:request(URL, Method, NewHeaders, Body, Timeout, HTTPOptions1).
 
 decode_json_response_ext({ok, {{200 = _StatusCode, _} = _StatusLine,
+                               _Headers, <<>>} = _Result},
+                         _Method, _Request) ->
+    {ok, undefined};
+decode_json_response_ext({ok, {{200 = _StatusCode, _} = _StatusLine,
                                _Headers, Body} = _Result},
                          _Method, _Request) ->
     try mochijson2:decode(Body) of
