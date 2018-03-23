@@ -50,8 +50,8 @@
          shun/1,
          start_link/0]).
 
--export([add_node_to_group/5,
-         engage_cluster/1, complete_join/1,
+-export([add_node_to_group/6,
+         engage_cluster/2, complete_join/1,
          check_host_connectivity/1, change_address/1,
          enforce_topology_limitation/1,
          rename_marker_path/0,
@@ -74,9 +74,10 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-add_node_to_group(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
-    RV = gen_server:call(?MODULE, {add_node_to_group, RemoteAddr, RestPort, Auth, GroupUUID, Services},
-                         ?ADD_NODE_TIMEOUT),
+add_node_to_group(RemoteAddr, RestPort, Auth, GroupUUID, Services, Settings) ->
+    Msg = {add_node_to_group, RemoteAddr, RestPort, Auth, GroupUUID, Services,
+           Settings},
+    RV = gen_server:call(?MODULE, Msg, ?ADD_NODE_TIMEOUT),
     case RV of
         {error, _What, Message, _Nested} ->
             ?cluster_log(?NODE_JOIN_FAILED, "Failed to add node ~s:~w to cluster. ~s",
@@ -85,7 +86,7 @@ add_node_to_group(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
     end,
     RV.
 
-engage_cluster(NodeKVList) ->
+engage_cluster(Req, NodeKVList) ->
     MyNode = node(),
     RawOtpNode = proplists:get_value(<<"otpNode">>, NodeKVList, <<"undefined">>),
     case binary_to_atom(RawOtpNode, latin1) of
@@ -93,19 +94,19 @@ engage_cluster(NodeKVList) ->
             {error, self_join,
              <<"Joining node to itself is not allowed.">>, {self_join, MyNode}};
         _ ->
-            engage_cluster_not_to_self(NodeKVList)
+            engage_cluster_not_to_self(Req, NodeKVList)
     end.
 
-engage_cluster_not_to_self(NodeKVList) ->
+engage_cluster_not_to_self(Req, NodeKVList) ->
     case proplists:get_value(<<"clusterCA">>, NodeKVList) of
         undefined ->
-            call_engage_cluster(NodeKVList);
+            call_engage_cluster(Req, NodeKVList);
         ClusterCA ->
             case ns_server_cert:apply_certificate_chain_from_inbox(ClusterCA) of
                 {ok, Props} ->
                     ?log_info("Custom certificate was loaded on the node before joining. Props: ~p",
                               [Props]),
-                    call_engage_cluster(NodeKVList);
+                    call_engage_cluster(Req, NodeKVList);
                 {error, Error} ->
                     Message =
                         iolist_to_binary(["Error applying node certificate. ",
@@ -114,8 +115,8 @@ engage_cluster_not_to_self(NodeKVList) ->
             end
     end.
 
-call_engage_cluster(NodeKVList) ->
-    gen_server:call(?MODULE, {engage_cluster, NodeKVList}, ?ENGAGE_TIMEOUT).
+call_engage_cluster(Req, NodeKVList) ->
+    gen_server:call(?MODULE, {engage_cluster, Req, NodeKVList}, ?ENGAGE_TIMEOUT).
 
 complete_join(NodeKVList) ->
     gen_server:call(?MODULE, {complete_join, NodeKVList}, ?COMPLETE_TIMEOUT).
@@ -170,15 +171,16 @@ sanitize_node_info(NodeKVList) ->
               continue
       end, NodeKVList).
 
-handle_call({add_node_to_group, RemoteAddr, RestPort, Auth, GroupUUID, Services}, _From, State) ->
+handle_call({add_node_to_group, RemoteAddr, RestPort, Auth, GroupUUID, Services,
+             Settings}, _From, State) ->
     ?cluster_debug("handling add_node(~p, ~p, ~p, ..)", [RemoteAddr, RestPort, GroupUUID]),
-    RV = do_add_node(RemoteAddr, RestPort, Auth, GroupUUID, Services),
+    RV = do_add_node(RemoteAddr, RestPort, Auth, GroupUUID, Services, Settings),
     ?cluster_debug("add_node(~p, ~p, ~p, ..) -> ~p", [RemoteAddr, RestPort, GroupUUID, RV]),
     {reply, RV, State};
 
-handle_call({engage_cluster, NodeKVList}, _From, State) ->
+handle_call({engage_cluster, Req, NodeKVList}, _From, State) ->
     ?cluster_debug("handling engage_cluster(~p)", [sanitize_node_info(NodeKVList)]),
-    RV = do_engage_cluster(NodeKVList),
+    RV = do_engage_cluster(Req, NodeKVList),
     ?cluster_debug("engage_cluster(..) -> ~p", [RV]),
     {reply, RV, State};
 
@@ -484,11 +486,11 @@ check_add_possible(Body) ->
             Body()
     end.
 
-do_add_node(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
+do_add_node(RemoteAddr, RestPort, Auth, GroupUUID, Services, Settings) ->
     check_add_possible(
       fun () ->
               do_add_node_allowed(RemoteAddr, RestPort, Auth,
-                                  GroupUUID, Services)
+                                  GroupUUID, Services, Settings)
       end).
 
 should_change_address() ->
@@ -496,7 +498,8 @@ should_change_address() ->
     ns_node_disco:nodes_wanted() =:= [node()] andalso
         not dist_manager:using_user_supplied_address().
 
-do_add_node_allowed(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
+do_add_node_allowed(RemoteAddr, RestPort, Auth, GroupUUID, Services,
+                    Settings) ->
     case check_host_connectivity(RemoteAddr) of
         {ok, MyIP} ->
             R = case should_change_address() of
@@ -518,7 +521,8 @@ do_add_node_allowed(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
             case R of
                 ok ->
                     do_add_node_with_connectivity(RemoteAddr, RestPort, Auth,
-                                                  GroupUUID, Services);
+                                                  GroupUUID, Services,
+                                                  Settings);
                 {address_save_failed, Error} = Nested ->
                     Msg = io_lib:format("Could not save address after rename: ~p",
                                         [Error]),
@@ -527,12 +531,15 @@ do_add_node_allowed(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
         X -> X
     end.
 
-do_add_node_with_connectivity(RemoteAddr, RestPort, Auth, GroupUUID, Services) ->
+do_add_node_with_connectivity(RemoteAddr, RestPort, Auth, GroupUUID, Services,
+                          Settings) ->
+
     {struct, NodeInfo} = menelaus_web_node:build_full_node_info(node(),
                                                                 misc:localhost()),
     Props = [{<<"requestedTargetNodeHostname">>, list_to_binary(RemoteAddr)},
              {<<"requestedServices">>, Services}]
-        ++ NodeInfo,
+        ++ NodeInfo
+        ++ [{<<"requestedSettings">>, {struct, Settings}} || Settings =/= []],
 
     Props1 =
         case ns_server_cert:cluster_ca() of
@@ -805,14 +812,14 @@ node_add_transaction_finish(Node, GroupUUID, Body) ->
             erlang:error(cannot_happen)
     end.
 
-do_engage_cluster(NodeKVList) ->
+do_engage_cluster(Req, NodeKVList) ->
     try
         case ns_cluster_membership:system_joinable() of
             false ->
                 {error, system_not_joinable,
                  <<"Node is already part of cluster.">>, system_not_joinable};
             true ->
-                do_engage_cluster_check_compatibility(NodeKVList)
+                do_engage_cluster_check_compatibility(Req, NodeKVList)
         end
     catch
         exit:{unexpected_json, _, _} = Exc ->
@@ -821,7 +828,7 @@ do_engage_cluster(NodeKVList) ->
              Exc}
     end.
 
-do_engage_cluster_check_compatibility(NodeKVList) ->
+do_engage_cluster_check_compatibility(Req, NodeKVList) ->
     Version = expect_json_property_binary(<<"version">>, NodeKVList),
     Node = expect_json_property_atom(<<"otpNode">>, NodeKVList),
 
@@ -831,10 +838,10 @@ do_engage_cluster_check_compatibility(NodeKVList) ->
              ns_error_messages:too_old_version_error(Node, Version),
              incompatible_cluster_version};
         _ ->
-            do_engage_cluster_check_compat_version(Node, Version, NodeKVList)
+            do_engage_cluster_check_compat_version(Req, Node, Version, NodeKVList)
     end.
 
-do_engage_cluster_check_compat_version(Node, Version, NodeKVList) ->
+do_engage_cluster_check_compat_version(Req, Node, Version, NodeKVList) ->
     ActualCompatibility = expect_json_property_integer(<<"clusterCompatibility">>, NodeKVList),
     MinSupportedCompatVersion = cluster_compat_mode:min_supported_compat_version(),
     MinSupportedCompatibility =
@@ -846,7 +853,7 @@ do_engage_cluster_check_compat_version(Node, Version, NodeKVList) ->
              ns_error_messages:too_old_version_error(Node, Version),
              incompatible_cluster_version};
         false ->
-            do_engage_cluster_check_services(NodeKVList)
+            do_engage_cluster_apply_settings(Req, NodeKVList)
     end.
 
 get_requested_services(KVList) ->
@@ -896,6 +903,22 @@ enforce_topology_limitation(Services) ->
                 false ->
                     {error, ns_error_messages:topology_limitation_error(SupportedCombinations)}
             end
+    end.
+
+do_engage_cluster_apply_settings(Req, NodeKVList) ->
+    {struct, Settings} = proplists:get_value(<<"requestedSettings">>,
+                                             NodeKVList, {struct, []}),
+    Params = [{binary_to_list(K), V} || {K, V} <- Settings],
+    case menelaus_web_node:apply_node_settings(Req, node(), Params) of
+        ok -> do_engage_cluster_check_services(NodeKVList);
+        restart ->
+            %% performing required restart from
+            %% successfull path change
+            {ok, _} = ns_server_cluster_sup:restart_ns_server(),
+            do_engage_cluster_check_services(NodeKVList);
+        {error, Msgs} = Error ->
+            ErrorMsg = misc:intersperse(Msgs, ". "),
+            {error, settings_applying_failed, iolist_to_binary(ErrorMsg), Error}
     end.
 
 do_engage_cluster_check_services(NodeKVList) ->

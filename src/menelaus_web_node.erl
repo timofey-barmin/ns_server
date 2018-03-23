@@ -34,7 +34,8 @@
          handle_node_altaddr_external/1,
          handle_node_altaddr_external_delete/1,
          handle_node_self_xdcr_ssl_ports/1,
-         handle_node_settings_post/2]).
+         handle_node_settings_post/2,
+         apply_node_settings/3]).
 
 -import(menelaus_util,
         [local_addr/1,
