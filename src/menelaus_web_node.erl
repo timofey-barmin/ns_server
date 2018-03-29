@@ -479,92 +479,88 @@ handle_node_settings_post("self", Req) ->
 handle_node_settings_post(S, Req) when is_list(S) ->
     handle_node_settings_post(list_to_atom(S), Req);
 handle_node_settings_post(Node, Req) when is_atom(Node) ->
-    Params = Req:parse_post(),
-
-    {ok, DefaultDbPath} = ns_storage_conf:this_node_dbdir(),
-    {ok, DefaultIndexPath} = ns_storage_conf:this_node_ixdir(),
-    DbPath = proplists:get_value("path", Params, DefaultDbPath),
-    IxPath = proplists:get_value("index_path", Params, DefaultIndexPath),
-
-    CBASDirs =
-        case [Dir || {"cbas_path", Dir} <- Params] of
-            [] ->
-                ns_storage_conf:this_node_cbas_dirs();
-            Dirs ->
-                Dirs
-        end,
-
     case Node =/= node() of
         true -> exit('Setting the disk storage path for other servers is not yet supported.');
         _ -> ok
     end,
 
-    case ns_config_auth:is_system_provisioned() andalso DbPath =/= DefaultDbPath of
-        true ->
-            %% MB-7344: we had 1.8.1 instructions allowing that. And
-            %% 2.0 works very differently making that original
-            %% instructions lose data. Thus we decided it's much safer
-            %% to un-support this path.
-            reply_json(
-              Req, {struct, [{error, <<"Changing data of nodes that are part of provisioned cluster is not supported">>}]}, 400),
-            exit(normal);
-        _ ->
-            ok
-    end,
+    Params = Req:parse_post(),
+    case apply_node_settings(Req, Node, Params) of
+        ok -> reply(Req, 200);
+        restart ->
+            %% NOTE: due to required restart we need to protect
+            %% ourselves from 'death signal' of parent
+            erlang:process_flag(trap_exit, true),
 
-    Results0 =
-        lists:usort(
-          lists:map(
-            fun ({Param, Path}) ->
-                    case Path of
-                        [] ->
-                            iolist_to_binary(io_lib:format("~p cannot contain empty string", [Param]));
-                        Path ->
-                            case misc:is_absolute_path(Path) of
-                                false ->
-                                    iolist_to_binary(
-                                      io_lib:format("An absolute path is required for ~p",
-                                                    [Param]));
-                                _ -> ok
-                            end
-                    end
+            %% performing required restart from
+            %% successfull path change
+            {ok, _} = ns_server_cluster_sup:restart_ns_server(),
+            reply(Req, 200),
+            erlang:exit(normal);
+        {error, Msgs} -> reply_json(Req, Msgs, 400)
+    end.
+
+apply_node_settings(Req, Node, Params) ->
+    try
+        {ok, DefaultDbPath} = ns_storage_conf:this_node_dbdir(),
+        {ok, DefaultIndexPath} = ns_storage_conf:this_node_ixdir(),
+        DbPath = proplists:get_value("path", Params, DefaultDbPath),
+        IxPath = proplists:get_value("index_path", Params, DefaultIndexPath),
+
+        CBASDirs =
+            case [Dir || {"cbas_path", Dir} <- Params] of
+                [] ->
+                    ns_storage_conf:this_node_cbas_dirs();
+                Dirs ->
+                    Dirs
             end,
-            [{path, DbPath}, {index_path, IxPath}] ++ [{cbas_path, Dir} || Dir <- CBASDirs])),
 
-    Results1 =
-        case Results0 of
-            [ok] ->
-                case ns_storage_conf:setup_disk_storage_conf(DbPath, IxPath, CBASDirs) of
-                    not_changed ->
-                        ok;
-                    ok ->
-                        ns_audit:disk_storage_conf(Req, Node, DbPath, IxPath, CBASDirs),
-                        ok;
-                    restart ->
-                        ns_audit:disk_storage_conf(Req, Node, DbPath, IxPath, CBASDirs),
-                        %% NOTE: due to required restart we need to protect
-                        %% ourselves from 'death signal' of parent
-                        erlang:process_flag(trap_exit, true),
-
-                        %% performing required restart from
-                        %% successfull path change
-                        {ok, _} = ns_server_cluster_sup:restart_ns_server(),
-                        reply(Req, 200),
-                        erlang:exit(normal);
-                    {errors, Msgs} ->
-                        Msgs
-                end;
+        DbPathChanged = DbPath =/= DefaultDbPath,
+        case ns_config_auth:is_system_provisioned() andalso DbPathChanged of
+            true ->
+                %% MB-7344: we had 1.8.1 instructions allowing that. And
+                %% 2.0 works very differently making that original
+                %% instructions lose data. Thus we decided it's much safer
+                %% to un-support this path.
+                Msg = "Changing data of nodes that are part of provisioned "
+                      "cluster is not supported",
+                erlang:throw({error, [Msg]});
             _ ->
-                Results0
+                ok
         end,
 
-    case Results1 of
-        ok ->
-            reply(Req, 200);
-        Errs ->
-            ErrsFiltered = [E || E <- Errs, E =/= ok],
-            true = ErrsFiltered =/= [],
-            reply_json(Req, ErrsFiltered, 400)
+        Errors =
+            lists:filtermap(
+              fun ({Param, []}) ->
+                      {true, ns_error_messages:empty_param(Param)};
+                  ({Param, Path}) ->
+                      case misc:is_absolute_path(Path) of
+                          false ->
+                            {true, ns_error_messages:not_absolute_path(Param)};
+                          _ -> false
+                      end
+              end,
+              [{path, DbPath}, {index_path, IxPath}] ++
+              [{cbas_path, Dir} || Dir <- CBASDirs]),
+
+        Errors == [] orelse throw({error, Errors}),
+
+        case ns_storage_conf:setup_disk_storage_conf(DbPath, IxPath, CBASDirs) of
+            not_changed ->
+                ok;
+            ok ->
+                ns_audit:disk_storage_conf(Req, Node, DbPath, IxPath, CBASDirs),
+                ok;
+            restart ->
+                ns_audit:disk_storage_conf(Req, Node, DbPath, IxPath, CBASDirs),
+                restart;
+            {errors, Msgs} ->
+                throw({error, Msgs})
+        end
+
+    catch
+        throw:{error, ErrorMsgs} ->
+            {error, [iolist_to_binary(M) || M <- ErrorMsgs]}
     end.
 
 %% Basic port validation is done.
