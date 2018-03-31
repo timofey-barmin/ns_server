@@ -1941,7 +1941,7 @@ hexify_digit(15) -> $f.
 hexify_test() ->
     lists:foreach(
       fun (_) ->
-              R = crypto:rand_bytes(256),
+              R = couch_util:strong_rand_bytes(256),
               Hex = hexify(R),
 
               Etalon0 = string:to_lower(integer_to_list(binary:decode_unsigned(R), 16)),

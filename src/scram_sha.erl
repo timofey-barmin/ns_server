@@ -312,7 +312,7 @@ hash_password(Type, Password) ->
               sha256 -> ?SHA256_DIGEST_SIZE;
               sha512 -> ?SHA512_DIGEST_SIZE
           end,
-    Salt = crypto:rand_bytes(Len),
+    Salt = couch_util:strong_rand_bytes(Len),
     Hash = pbkdf2(Type, Password, Salt, Iterations),
     {Salt, Hash, Iterations}.
 
