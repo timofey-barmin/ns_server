@@ -1941,7 +1941,7 @@ hexify_digit(15) -> $f.
 hexify_test() ->
     lists:foreach(
       fun (_) ->
-              R = crypto:rand_bytes(256),
+              R = misc:strong_rand_bytes(256),
               Hex = hexify(R),
 
               Etalon0 = string:to_lower(integer_to_list(binary:decode_unsigned(R), 16)),
@@ -2505,3 +2505,19 @@ no_duplicates_test() ->
     ?assertEqual([],  duplicates([1,2,3,"1"])),
     ?assertEqual([1,2,2], duplicates([1,2,1,2,3,2])).
 -endif.
+
+strong_rand_bytes(N) ->
+    strong_rand_bytes(N, 10).
+
+strong_rand_bytes(N, Retries) ->
+    try
+        crypto:strong_rand_bytes(N)
+    catch
+        error:low_entropy when N > 1 ->
+            ?log_warning("Got low_entropy exception, "
+                         "trying to add some entropy and try again..."),
+            SeedTerm = {erlang:monotonic_time(), erlang:unique_integer()},
+            SeedBin = crypto:hash(sha256, term_to_binary(SeedTerm)),
+            crypto:rand_seed(SeedBin),
+            strong_rand_bytes(N, Retries - 1)
+    end.
