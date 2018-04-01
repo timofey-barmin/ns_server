@@ -43,7 +43,7 @@ start(_, _) ->
     Cookie =
         case erlang:get_cookie() of
             nocookie ->
-                random:seed(os:timestamp()),
+                rand:seed(exrop, misc:generate_crypto_seed()),
                 NewCookie = list_to_atom(misc:rand_str(16)),
                 erlang:set_cookie(node(), NewCookie),
                 NewCookie;

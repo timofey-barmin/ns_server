@@ -48,7 +48,7 @@
 -export_type([timer/0, timer/1]).
 
 shuffle(List) when is_list(List) ->
-    [N || {_R, N} <- lists:keysort(1, [{random:uniform(), X} || X <- List])].
+    [N || {_R, N} <- lists:keysort(1, [{rand:uniform(), X} || X <- List])].
 
 get_days_list() ->
     ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].
@@ -156,7 +156,7 @@ rm_rf_loop(DirName, [F | Files]) ->
 
 rand_str(N) ->
   lists:map(fun(_I) ->
-      random:uniform(26) + $a - 1
+      rand:uniform(26) + $a - 1
     end, lists:seq(1,N)).
 
 nthreplace(N, E, List) ->
@@ -1234,7 +1234,7 @@ executing_on_new_process_test() ->
                                        register(grandchild, self()),
                                        timer:sleep(3600 * 1000)
                                end))),
-              timer:sleep(random:uniform(5) - 1),
+              timer:sleep(rand:uniform(5) - 1),
               exit(P, shutdown),
               ok = wait_for_process(P, 500),
               undefined = whereis(grandchild)
@@ -2455,7 +2455,7 @@ unlink_terminate_and_wait_kill_the_killer_test_() ->
 
                        receive linked -> ok end,
                        Killer ! kill,
-                       delay(random:uniform(10000)),
+                       delay(rand:uniform(10000)),
                        exit(Killer, kill),
 
                        ok = wait_for_process(Killer, 1000),
@@ -2505,3 +2505,11 @@ no_duplicates_test() ->
     ?assertEqual([],  duplicates([1,2,3,"1"])),
     ?assertEqual([1,2,2], duplicates([1,2,1,2,3,2])).
 -endif.
+
+%% Generates a cryptographically strong seed which can be used in rand:seed/2
+generate_crypto_seed() ->
+    <<I1:32/unsigned-integer,
+      I2:32/unsigned-integer,
+      I3:32/unsigned-integer>> = couch_util:strong_rand_bytes(12),
+    {I1, I2, I3}.
+
