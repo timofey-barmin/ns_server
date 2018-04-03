@@ -65,6 +65,7 @@ view_plugin() ->
             proxy_strategy = local,
             rest_api_prefixes = dict:from_list(Prefixes),
             doc_roots = [],
+            version_dirs = decode_version_dirs(undefined),
             request_headers_filter = {keep, ["accept",
                                              "accept-encoding",
                                              "accept-language",
