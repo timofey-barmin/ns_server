@@ -516,7 +516,10 @@ apply_node_settings(Req, Node, Params) ->
             end,
 
         DbPathChanged = DbPath =/= DefaultDbPath,
-        case ns_config_auth:is_system_provisioned() andalso DbPathChanged of
+        Provisioned = ns_config_auth:is_system_provisioned(),
+        NodeStatus = ns_cluster_membership:get_cluster_membership(node()),
+
+        case DbPathChanged and Provisioned and (NodeStatus =/= inactiveAdded) of
             true ->
                 %% MB-7344: we had 1.8.1 instructions allowing that. And
                 %% 2.0 works very differently making that original
