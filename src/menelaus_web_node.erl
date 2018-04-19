@@ -34,7 +34,8 @@
          handle_node_altaddr_external/1,
          handle_node_altaddr_external_delete/1,
          handle_node_self_xdcr_ssl_ports/1,
-         handle_node_settings_post/2]).
+         handle_node_settings_post/2,
+         apply_node_settings/1]).
 
 -import(menelaus_util,
         [local_addr/1,
@@ -479,15 +480,20 @@ handle_node_settings_post("self", Req) ->
 handle_node_settings_post(S, Req) when is_list(S) ->
     handle_node_settings_post(list_to_existing_atom(S), Req);
 handle_node_settings_post(Node, Req) when is_atom(Node) ->
-    case Node =/= node() of
-        true -> exit('Setting the disk storage path for other servers is not yet supported.');
+    Params = Req:parse_post(),
+    case cluster_compat_mode:is_cluster_madhatter() of
+        false when Node =/= node() ->
+            exit('Setting the disk storage path for other servers is not yet supported.');
         _ -> ok
     end,
-
-    Params = Req:parse_post(),
-    case apply_node_settings(Req, Node, Params) of
-        ok -> reply(Req, 200);
-        restart ->
+    case rpc:call(Node, ?MODULE, apply_node_settings, [Params]) of
+        {ok, not_changed} ->
+            reply(Req, 200);
+        {ok, {false, NewPaths}} ->
+            ns_audit:disk_storage_conf(Req, Node, NewPaths),
+            reply(Req, 200);
+        {ok, {true, NewPaths}} when Node == node() ->
+            ns_audit:disk_storage_conf(Req, Node, NewPaths),
             %% NOTE: due to required restart we need to protect
             %% ourselves from 'death signal' of parent
             erlang:process_flag(trap_exit, true),
@@ -497,10 +503,22 @@ handle_node_settings_post(Node, Req) when is_atom(Node) ->
             {ok, _} = ns_server_cluster_sup:restart_ns_server(),
             reply(Req, 200),
             erlang:exit(normal);
-        {error, Msgs} -> reply_json(Req, Msgs, 400)
+        {ok, {true, NewPaths}} ->
+            ns_audit:disk_storage_conf(Req, Node, NewPaths),
+            %% performing required restart from
+            %% successfull path change
+            {ok, _} =
+                rpc:call(Node, ns_server_cluster_sup, restart_ns_server, []),
+            reply(Req, 200);
+        {error, Msgs} ->
+            reply_json(Req, Msgs, 400)
     end.
 
-apply_node_settings(Req, Node, Params) ->
+-spec apply_node_settings(Params) -> {ok, {NeedServerRestart, NewPaths}} when
+        Params :: [{string(), term()}],
+        NeedServerRestart :: true | false,
+        NewPaths :: [{atom(), string()}].
+apply_node_settings(Params) ->
     try
         {ok, DefaultDbPath} = ns_storage_conf:this_node_dbdir(),
         {ok, DefaultIndexPath} = ns_storage_conf:this_node_ixdir(),
@@ -548,17 +566,15 @@ apply_node_settings(Req, Node, Params) ->
 
         Errors == [] orelse throw({error, Errors}),
 
+        NewPaths = [{db_path, DbPath},
+                    {index_path, IxPath},
+                    {cbas_dirs, {list, CBASDirs}}],
+
         case ns_storage_conf:setup_disk_storage_conf(DbPath, IxPath, CBASDirs) of
-            not_changed ->
-                ok;
-            ok ->
-                ns_audit:disk_storage_conf(Req, Node, DbPath, IxPath, CBASDirs),
-                ok;
-            restart ->
-                ns_audit:disk_storage_conf(Req, Node, DbPath, IxPath, CBASDirs),
-                restart;
-            {errors, Msgs} ->
-                throw({error, Msgs})
+            not_changed -> {ok, not_changed};
+            ok ->          {ok, {false, NewPaths}};
+            restart ->     {ok, {true,  NewPaths}};
+            {errors, Msgs} -> throw({error, Msgs})
         end
 
     catch
