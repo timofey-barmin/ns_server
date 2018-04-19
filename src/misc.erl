@@ -2520,3 +2520,10 @@ strong_rand_bytes(N, Retries) ->
             strong_rand_bytes(N, Retries - 1)
     end.
 
+%% Generates a cryptographically strong seed which can be used in rand:seed/2
+generate_crypto_seed() ->
+    <<I1:32/unsigned-integer,
+      I2:32/unsigned-integer,
+      I3:32/unsigned-integer>> = strong_rand_bytes(12),
+    {I1, I2, I3}.
+
