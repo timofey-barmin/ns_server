@@ -38,8 +38,10 @@ maybe_refresh(Token) ->
     token_server:maybe_refresh(?MODULE, Token).
 
 -spec set_token_node(auth_token(), atom()) -> auth_token().
-set_token_node(Token, Node) ->
-    iolist_to_binary([atom_to_list(Node), ?TOKEN_NODE_SEPARATOR, Token]).
+set_token_node(Token, Node) when is_atom(Node) ->
+    NodeToken = iolist_to_binary([atom_to_list(Node), ?TOKEN_NODE_SEPARATOR,
+                                  Token]),
+    iolist_to_binary([hash(NodeToken), ?TOKEN_NODE_SEPARATOR, NodeToken]).
 
 -spec get_token_node(auth_token() | undefined) ->
         {ok, {Node :: atom(), auth_token() | undefined}} |
@@ -51,13 +53,25 @@ get_token_node(Token) when is_list(Token) ->
 get_token_node(Token) when is_binary(Token) ->
     case binary:split(Token, ?TOKEN_NODE_SEPARATOR) of
         [Token] -> {ok, {undefined, Token}};
-        [NodeBin, CleanToken] ->
-            try erlang:binary_to_existing_atom(NodeBin, latin1) of
-                Node -> {ok, {Node, CleanToken}}
-            catch
-                error:badarg -> {error, badarg}
+        [Proof, NodeToken] ->
+            case hash(NodeToken) of
+                Proof ->
+                    [NodeBin, CleanToken] = binary:split(NodeToken,
+                                                         ?TOKEN_NODE_SEPARATOR),
+                    try erlang:binary_to_existing_atom(NodeBin, latin1) of
+                        Node -> {ok, {Node, CleanToken}}
+                    catch
+                        error:badarg -> {error, badarg}
+                    end;
+                _ ->
+                    {error, badarg}
             end
     end.
+
+hash(Data) ->
+    Secret = atom_to_list(erlang:get_cookie()),
+    HashBin = crypto:hmac(sha, Secret, Data),
+    misc:hexify(HashBin).
 
 -spec check(auth_token() | undefined) -> false | {ok, term()}.
 check(Token) ->
