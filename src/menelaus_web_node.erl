@@ -529,8 +529,12 @@ validate_dir_path(Field, Path) ->
 -spec handle_node_settings_post(string() | atom(), any()) -> no_return().
 handle_node_settings_post("self", Req) ->
     handle_node_settings_post(node(), Req);
-handle_node_settings_post(S, Req) when is_list(S) ->
-    handle_node_settings_post(list_to_existing_atom(S), Req);
+handle_node_settings_post(NodeStr, Req) when is_list(NodeStr) ->
+    try list_to_existing_atom(NodeStr) of
+        Node -> handle_node_settings_post(Node, Req)
+    catch
+        error:badarg -> menelaus_util:reply_not_found(Req)
+    end;
 handle_node_settings_post(Node, Req) when is_atom(Node) ->
     case cluster_compat_mode:is_cluster_madhatter() of
         false when Node =/= node() ->
@@ -541,32 +545,43 @@ handle_node_settings_post(Node, Req) when is_atom(Node) ->
 
     Params = mochiweb_request:parse_post(Req),
 
-    case rpc:call(Node, ?MODULE, apply_node_settings, [Params]) of
-        not_changed ->
-            reply(Req, 200);
-        ok  ->
-            ns_audit:disk_storage_conf(Req, Node, Params),
-            reply(Req, 200);
-        restart when Node == node() ->
-            ns_audit:disk_storage_conf(Req, Node, Params),
-            %% NOTE: due to required restart we need to protect
-            %% ourselves from 'death signal' of parent
-            erlang:process_flag(trap_exit, true),
+    case lists:member(Node, ns_node_disco:nodes_actual())  of
+        true ->
+            case rpc:call(Node, ?MODULE, apply_node_settings, [Params]) of
+                not_changed ->
+                    reply(Req, 200);
+                ok  ->
+                    ns_audit:disk_storage_conf(Req, Node, Params),
+                    reply(Req, 200);
+                restart when Node == node() ->
+                    ns_audit:disk_storage_conf(Req, Node, Params),
+                    %% NOTE: due to required restart we need to protect
+                    %% ourselves from 'death signal' of parent
+                    erlang:process_flag(trap_exit, true),
 
-            %% performing required restart from
-            %% successfull path change
-            {ok, _} = ns_server_cluster_sup:restart_ns_server(),
-            reply(Req, 200),
-            erlang:exit(normal);
-        restart ->
-            ns_audit:disk_storage_conf(Req, Node, Params),
-            %% performing required restart from
-            %% successfull path change
-            {ok, _} =
-                rpc:call(Node, ns_server_cluster_sup, restart_ns_server, []),
-            reply(Req, 200);
-        {error, Msgs} ->
-            reply_json(Req, Msgs, 400)
+                    %% performing required restart from
+                    %% successfull path change
+                    {ok, _} = ns_server_cluster_sup:restart_ns_server(),
+                    reply(Req, 200),
+                    erlang:exit(normal);
+                restart ->
+                    ns_audit:disk_storage_conf(Req, Node, Params),
+                    %% performing required restart from
+                    %% successfull path change
+                    {ok, _} = rpc:call(Node, ns_server_cluster_sup,
+                                       restart_ns_server, []),
+                    reply(Req, 200);
+                {error, Msgs} ->
+                    reply_json(Req, Msgs, 400)
+            end;
+        false ->
+            case lists:member(Node, ns_node_disco:nodes_wanted()) of
+                true ->
+                    menelaus_util:reply_text(Req, "Node is not available.",
+                                             503);
+                false ->
+                    menelaus_util:reply_not_found(Req)
+            end
     end.
 
 -spec apply_node_settings(Params :: [{Key :: string(), Value :: term()}]) ->
