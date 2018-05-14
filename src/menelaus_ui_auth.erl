@@ -24,6 +24,8 @@
 -export([generate_token/1, maybe_refresh/1,
          check/1, reset/0, logout/1, set_token_node/2]).
 
+-define(TOKEN_NODE_SEPARATOR, <<"*">>).
+
 start_link() ->
     token_server:start_link(?MODULE, 1024, ?UI_AUTH_EXPIRATION_SECONDS).
 
@@ -37,7 +39,7 @@ maybe_refresh(Token) ->
 
 -spec set_token_node(auth_token(), atom()) -> auth_token().
 set_token_node(Token, Node) ->
-    iolist_to_binary([atom_to_list(Node), ":", Token]).
+    iolist_to_binary([atom_to_list(Node), ?TOKEN_NODE_SEPARATOR, Token]).
 
 -spec get_token_node(auth_token() | undefined) ->
         {ok, {Node :: atom(), auth_token() | undefined}} |
@@ -47,7 +49,7 @@ get_token_node(undefined) ->
 get_token_node(Token) when is_list(Token) ->
     get_token_node(list_to_binary(Token));
 get_token_node(Token) when is_binary(Token) ->
-    case binary:split(Token, <<":">>) of
+    case binary:split(Token, ?TOKEN_NODE_SEPARATOR) of
         [Token] -> {ok, {undefined, Token}};
         [NodeBin, CleanToken] ->
             try erlang:binary_to_existing_atom(NodeBin, latin1) of
