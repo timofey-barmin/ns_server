@@ -378,8 +378,6 @@ handle_event({call, From}, {update_bucket, membase, BucketName, UpdatedProps},
     {keep_state_and_data,
         [{next_event, {call, From},
             {update_bucket, membase, couchstore, BucketName, UpdatedProps}}]};
-handle_event({call, From}, {update_bucket, _, _, _, _}, rebalancing, _State) ->
-    {keep_state_and_data, [{reply, From, rebalance_running}]};
 handle_event({call, From},
              {update_bucket, BucketType, StorageMode, BucketName, UpdatedProps},
              _StateName, _State) ->
@@ -430,53 +428,9 @@ handle_event({call, From}, Msg, _StateName, _State)
        element(1, Msg) =:= commit_vbucket;
        element(1, Msg) =:= stop_recovery ->
     {keep_state_and_data, [{reply, From, bad_recovery}]};
-
-handle_event(info, janitor, idle, _State) ->
-    misc:verify_name(?MODULE), % MB-3180: Make sure we're still registered
-    consider_switching_compat_mode(),
-    {ok, ID} = ns_janitor_server:start_cleanup(fun(Pid, UnsafeNodes, CleanupID) ->
-                                                       Pid ! {cleanup_done, UnsafeNodes, CleanupID},
-                                                       ok
-                                               end),
-    {next_state, janitor_running, #janitor_state{cleanup_id = ID}};
-
 handle_event(info, janitor, StateName, _StateData) ->
     ?log_info("Skipping janitor in state ~p", [StateName]),
     keep_state_and_data;
-
-handle_event(info, {'EXIT', Pid, Reason}, rebalancing,
-            #rebalancing_state{rebalancer = Pid} = State) ->
-    handle_rebalance_completion(Reason, State);
-
-handle_event(info, {'EXIT', Pid, Reason}, recovery, #recovery_state{pid = Pid}) ->
-    ale:error(?USER_LOGGER,
-              "Recovery process ~p terminated unexpectedly: ~p", [Pid, Reason]),
-    {next_state, idle, #idle_state{}};
-
-handle_event(info, {cleanup_done, UnsafeNodes, ID}, janitor_running,
-             #janitor_state{cleanup_id = CleanupID}) ->
-    %% If we get here we don't expect the IDs to be different.
-    ID = CleanupID,
-
-    %% If any 'unsafe nodes' were found then trigger an auto_reprovision operation
-    %% via the orchestrator.
-    case UnsafeNodes =/= [] of
-        true ->
-            %% The unsafe nodes only affect the ephemeral buckets.
-            Buckets = ns_bucket:get_bucket_names_of_type(membase, ephemeral),
-            RV = auto_reprovision:reprovision_buckets(Buckets, UnsafeNodes),
-            ?log_info("auto_reprovision status = ~p (Buckets = ~p, UnsafeNodes = ~p)",
-                      [RV, Buckets, UnsafeNodes]),
-
-            %% Trigger the janitor cleanup immediately as the buckets need to be
-            %% brought online.
-            self() ! janitor;
-        false ->
-            ok
-    end,
-    consider_switching_compat_mode(),
-    {next_state, idle, #idle_state{}};
-
 %% Backward compitibility: handle messages from nodes that are older than
 %%                         Mad-Hatter which use gen_fsm api's
 handle_event(info, {'$gen_sync_all_state_event', From, Event}, _StateName,
@@ -523,6 +477,14 @@ idle(cast, {request_janitor_run, Item}, State) ->
 idle(cast, {update_progress, _, _}, _State) ->
     %% This will catch stray progress messages
     keep_state_and_data;
+idle(info, janitor, _State) ->
+    misc:verify_name(?MODULE), % MB-3180: Make sure we're still registered
+    consider_switching_compat_mode(),
+    {ok, ID} = ns_janitor_server:start_cleanup(fun(Pid, UnsafeNodes, CleanupID) ->
+                                                       Pid ! {cleanup_done, UnsafeNodes, CleanupID},
+                                                       ok
+                                               end),
+    {next_state, janitor_running, #janitor_state{cleanup_id = ID}};
 
 %% Synchronous idle events
 idle({call, From},
@@ -739,6 +701,29 @@ janitor_running(cast, {request_janitor_run, Item}, State) ->
     do_request_janitor_run(Item, janitor_running, State);
 janitor_running(cast, _Event, _State) ->
     keep_state_and_data;
+janitor_running(info, {cleanup_done, UnsafeNodes, ID},
+                #janitor_state{cleanup_id = CleanupID}) ->
+    %% If we get here we don't expect the IDs to be different.
+    ID = CleanupID,
+
+    %% If any 'unsafe nodes' were found then trigger an auto_reprovision operation
+    %% via the orchestrator.
+    case UnsafeNodes =/= [] of
+        true ->
+            %% The unsafe nodes only affect the ephemeral buckets.
+            Buckets = ns_bucket:get_bucket_names_of_type(membase, ephemeral),
+            RV = auto_reprovision:reprovision_buckets(Buckets, UnsafeNodes),
+            ?log_info("auto_reprovision status = ~p (Buckets = ~p, UnsafeNodes = ~p)",
+                      [RV, Buckets, UnsafeNodes]),
+
+            %% Trigger the janitor cleanup immediately as the buckets need to be
+            %% brought online.
+            self() ! janitor;
+        false ->
+            ok
+    end,
+    consider_switching_compat_mode(),
+    {next_state, idle, #idle_state{}};
 
 %% Synchronous janitor_running events
 janitor_running({call, From}, rebalance_progress, _State) ->
@@ -794,6 +779,9 @@ rebalancing(info, {timeout, TRef, stop_timeout},
                 R
         end,
     handle_rebalance_completion(Reason, State);
+rebalancing(info, {'EXIT', Pid, Reason},
+            #rebalancing_state{rebalancer = Pid} = State) ->
+    handle_rebalance_completion(Reason, State);
 
 %% Synchronous rebalancing events
 rebalancing({call, From},
@@ -816,6 +804,8 @@ rebalancing({call, From}, rebalance_progress,
             #rebalancing_state{progress = Progress}) ->
     AggregatedProgress = dict:to_list(rebalance_progress:get_progress(Progress)),
     {keep_state_and_data, [{reply, From, {running, AggregatedProgress}}]};
+rebalancing({call, From}, {update_bucket, _, _, _, _}, _State) ->
+    {keep_state_and_data, [{reply, From, rebalance_running}]};
 rebalancing({call, From}, Event, _State)
   when element(1, Event) =:= create_bucket;
        element(1, Event) =:= delete_bucket;
@@ -830,6 +820,11 @@ rebalancing({call, From}, Event, _State)
 rebalancing(Type, Event, State) ->
     handle_event(Type, Event, rebalancing, State).
 
+%% Asynchronous recovery events
+recovery(info, {'EXIT', Pid, Reason}, #recovery_state{pid = Pid}) ->
+    ale:error(?USER_LOGGER,
+              "Recovery process ~p terminated unexpectedly: ~p", [Pid, Reason]),
+    {next_state, idle, #idle_state{}};
 %% Synchronous recovery events
 recovery({call, From}, {start_recovery, _Bucket}, _State) ->
     {keep_state_and_data, [{reply, From, recovery_running}]};
