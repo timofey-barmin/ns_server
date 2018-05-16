@@ -146,7 +146,6 @@ delete_bucket(BucketName) ->
                           in_recovery |
                           bucket_not_found |
                           flush_disabled |
-                          not_supported |       % if we're in 1.8.x compat mode and trying to flush couchbase bucket
                           {prepare_flush_failed, _, _} |
                           {initial_config_sync_failed, _} |
                           {flush_config_sync_failed, _} |
@@ -393,17 +392,6 @@ handle_event({call, From},
         _ -> ok
     end,
     {keep_state_and_data, [{reply, From, Reply}]};
-
-%% this message is sent by pre-3.0 nodes
-handle_event({call, From},
-             {maybe_start_rebalance, KnownNodes, EjectedNodes},
-             _StateName, _State) ->
-    %% old nodes cannot handle error from inability to delta-recover
-    %% buckets
-    {keep_state_and_data,
-        [{next_event, {call, From},
-            {maybe_start_rebalance, KnownNodes, EjectedNodes, []}}]};
-%% this one is sent by post-3.0 nodes
 handle_event({call, From},
              {maybe_start_rebalance, KnownNodes, EjectedNodes,
                                      DeltaRecoveryBuckets},
