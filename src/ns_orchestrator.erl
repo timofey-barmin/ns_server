@@ -369,18 +369,18 @@ init([]) ->
 %% be backward compatible we need to field both types of messages.
 
 handle_event({call, From}, {update_bucket, memcached, BucketName, UpdatedProps},
-             _StateName, _State) ->
+             _StateName, _StateData) ->
     {keep_state_and_data,
         [{next_event, {call, From},
             {update_bucket, memcached, undefined, BucketName, UpdatedProps}}]};
 handle_event({call, From}, {update_bucket, membase, BucketName, UpdatedProps},
-             _StateName, _State) ->
+             _StateName, _StateData) ->
     {keep_state_and_data,
         [{next_event, {call, From},
             {update_bucket, membase, couchstore, BucketName, UpdatedProps}}]};
 handle_event({call, From},
              {update_bucket, BucketType, StorageMode, BucketName, UpdatedProps},
-             _StateName, _State) ->
+             _StateName, _StateData) ->
     Reply = ns_bucket:update_bucket_props(BucketType, StorageMode,
                                           BucketName, UpdatedProps),
     case Reply of
@@ -393,7 +393,7 @@ handle_event({call, From},
 handle_event({call, From},
              {maybe_start_rebalance, KnownNodes, EjectedNodes,
                                      DeltaRecoveryBuckets},
-             _StateName, _State) ->
+             _StateName, _StateData) ->
     case {EjectedNodes -- KnownNodes,
           lists:sort(ns_node_disco:nodes_wanted()),
           lists:sort(KnownNodes)} of
@@ -421,9 +421,9 @@ handle_event({call, From},
             {keep_state_and_data, [{reply, From, nodes_mismatch}]}
     end;
 
-handle_event({call, From}, recovery_status, _StateName, _State) ->
+handle_event({call, From}, recovery_status, _StateName, _StateData) ->
     {keep_state_and_data, [{reply, From, not_in_recovery}]};
-handle_event({call, From}, Msg, _StateName, _State)
+handle_event({call, From}, Msg, _StateName, _StateData)
   when element(1, Msg) =:= recovery_map;
        element(1, Msg) =:= commit_vbucket;
        element(1, Msg) =:= stop_recovery ->
@@ -472,12 +472,12 @@ terminate(_Reason, _StateName, _StateData) ->
 
 %% Asynchronous idle events
 
-idle(cast, {request_janitor_run, Item}, State) ->
-    do_request_janitor_run(Item, idle, State);
-idle(cast, {update_progress, _, _}, _State) ->
+idle(cast, {request_janitor_run, Item}, StateData) ->
+    do_request_janitor_run(Item, idle, StateData);
+idle(cast, {update_progress, _, _}, _StateData) ->
     %% This will catch stray progress messages
     keep_state_and_data;
-idle(info, janitor, _State) ->
+idle(info, janitor, _StateData) ->
     misc:verify_name(?MODULE), % MB-3180: Make sure we're still registered
     consider_switching_compat_mode(),
     {ok, ID} = ns_janitor_server:start_cleanup(fun(Pid, UnsafeNodes, CleanupID) ->
@@ -488,7 +488,7 @@ idle(info, janitor, _State) ->
 
 %% Synchronous idle events
 idle({call, From},
-     {create_bucket, BucketType, BucketName, NewConfig}, _State) ->
+     {create_bucket, BucketType, BucketName, NewConfig}, _StateData) ->
     Reply = case ns_bucket:name_conflict(BucketName) of
                 false ->
                     {Results, FailedNodes} = rpc:multicall(ns_node_disco:nodes_wanted(), ns_memcached, active_buckets, [], ?CREATE_BUCKET_TIMEOUT),
@@ -515,7 +515,7 @@ idle({call, From},
         _ -> ok
     end,
     {keep_state_and_data, [{reply, From, Reply}]};
-idle({call, From}, {flush_bucket, BucketName}, _State) ->
+idle({call, From}, {flush_bucket, BucketName}, _StateData) ->
     RV = perform_bucket_flushing(BucketName),
     case RV of
         ok -> ok;
@@ -523,7 +523,7 @@ idle({call, From}, {flush_bucket, BucketName}, _State) ->
             ale:info(?USER_LOGGER, "Flushing ~p failed with error: ~n~p", [BucketName, RV])
     end,
     {keep_state_and_data, [{reply, From, RV}]};
-idle({call, From}, {delete_bucket, BucketName}, _State) ->
+idle({call, From}, {delete_bucket, BucketName}, _StateData) ->
     menelaus_users:cleanup_bucket_roles(BucketName),
     DeleteRV = ns_bucket:delete_bucket_returning_config(BucketName),
 
@@ -574,15 +574,15 @@ idle({call, From}, {delete_bucket, BucketName}, _State) ->
     end,
 
     {keep_state_and_data, [{reply, From, Reply}]};
-idle({call, From}, {failover, Node}, _State) ->
+idle({call, From}, {failover, Node}, _StateData) ->
     %% calls from pre-5.5 nodes
     {keep_state_and_data,
         [{next_event, {call, From}, {failover, [Node], false}}]};
-idle({call, From}, {failover, Nodes, AllowUnsafe}, _State) ->
+idle({call, From}, {failover, Nodes, AllowUnsafe}, _StateData) ->
     Result = ns_rebalancer:run_failover(Nodes, AllowUnsafe),
 
     {keep_state_and_data, [{reply, From, Result}]};
-idle({call, From}, {try_autofailover, Nodes}, _State) ->
+idle({call, From}, {try_autofailover, Nodes}, _StateData) ->
     case ns_rebalancer:validate_autofailover(Nodes) of
         {error, UnsafeBuckets} ->
             {keep_state_and_data,
@@ -591,7 +591,7 @@ idle({call, From}, {try_autofailover, Nodes}, _State) ->
             {keep_state_and_data,
                 [{next_event, {call, From}, {failover, Nodes, false}}]}
     end;
-idle({call, From}, {start_graceful_failover, Node}, _State) ->
+idle({call, From}, {start_graceful_failover, Node}, _StateData) ->
     case ns_rebalancer:start_link_graceful_failover(Node) of
         {ok, Pid} ->
             Type = graceful_failover,
@@ -612,11 +612,11 @@ idle({call, From}, {start_graceful_failover, Node}, _State) ->
         {error, RV} ->
             {keep_state_and_data, [{reply, From, RV}]}
     end;
-idle({call, From}, rebalance_progress, _State) ->
+idle({call, From}, rebalance_progress, _StateData) ->
     {keep_state_and_data, [{reply, From, not_running}]};
 %% NOTE: this is not remotely called but is used by maybe_start_rebalance
 idle({call, From}, {start_rebalance, KeepNodes, EjectNodes,
-                    FailedNodes, DeltaNodes, DeltaRecoveryBuckets}, _State) ->
+                    FailedNodes, DeltaNodes, DeltaRecoveryBuckets}, _StateData) ->
     case ns_rebalancer:start_link_rebalance(KeepNodes, EjectNodes,
                                             FailedNodes, DeltaNodes, DeltaRecoveryBuckets) of
         {ok, Pid} ->
@@ -649,7 +649,7 @@ idle({call, From}, {start_rebalance, KeepNodes, EjectNodes,
         {error, delta_recovery_not_possible} ->
             {keep_state_and_data, [{reply, From, delta_recovery_not_possible}]}
     end;
-idle({call, From}, {move_vbuckets, Bucket, Moves}, _State) ->
+idle({call, From}, {move_vbuckets, Bucket, Moves}, _StateData) ->
     Pid = spawn_link(
             fun () ->
                     ns_rebalancer:move_vbuckets(Bucket, Moves)
@@ -670,7 +670,7 @@ idle({call, From}, {move_vbuckets, Bucket, Moves}, _State) ->
                         failed_nodes=[],
                         type=Type},
      [{reply, From, ok}]};
-idle({call, From}, stop_rebalance, _State) ->
+idle({call, From}, stop_rebalance, _StateData) ->
     ns_janitor:stop_rebalance_status(
       fun () ->
               ?user_log(?REBALANCE_STOPPED,
@@ -679,7 +679,7 @@ idle({call, From}, stop_rebalance, _State) ->
               none
       end),
     {keep_state_and_data, [{reply, From, not_rebalancing}]};
-idle({call, {FromPid, _} = From}, {start_recovery, Bucket}, _State) ->
+idle({call, {FromPid, _} = From}, {start_recovery, Bucket}, _StateData) ->
     case recovery_server:start_recovery(Bucket, FromPid) of
         {ok, Pid, UUID, Map} ->
             {next_state, recovery, #recovery_state{pid = Pid},
@@ -687,19 +687,19 @@ idle({call, {FromPid, _} = From}, {start_recovery, Bucket}, _State) ->
         Error ->
             {keep_state_and_data, [{reply, From, Error}]}
     end;
-idle({call, From}, {ensure_janitor_run, Item}, State) ->
+idle({call, From}, {ensure_janitor_run, Item}, StateData) ->
     do_request_janitor_run(
       Item,
       fun (Reason) ->
               gen_statem:reply(From, Reason)
-      end, idle, State);
-idle(Type, Event, State) ->
-    handle_event(Type, Event, idle, State).
+      end, idle, StateData);
+idle(Type, Event, StateData) ->
+    handle_event(Type, Event, idle, StateData).
 
 %% Asynchronous janitor_running events
-janitor_running(cast, {request_janitor_run, Item}, State) ->
-    do_request_janitor_run(Item, janitor_running, State);
-janitor_running(cast, _Event, _State) ->
+janitor_running(cast, {request_janitor_run, Item}, StateData) ->
+    do_request_janitor_run(Item, janitor_running, StateData);
+janitor_running(cast, _Event, _StateData) ->
     keep_state_and_data;
 janitor_running(info, {cleanup_done, UnsafeNodes, ID},
                 #janitor_state{cleanup_id = CleanupID}) ->
@@ -726,14 +726,14 @@ janitor_running(info, {cleanup_done, UnsafeNodes, ID},
     {next_state, idle, #idle_state{}};
 
 %% Synchronous janitor_running events
-janitor_running({call, From}, rebalance_progress, _State) ->
+janitor_running({call, From}, rebalance_progress, _StateData) ->
     {keep_state_and_data, [{reply, From, not_running}]};
-janitor_running({call, From}, {ensure_janitor_run, Item}, State) ->
+janitor_running({call, From}, {ensure_janitor_run, Item}, StateData) ->
     do_request_janitor_run(
       Item,
       fun (Reason) ->
               gen_statem:reply(From, Reason)
-      end, janitor_running, State);
+      end, janitor_running, StateData);
 janitor_running({call, From}, Msg, #janitor_state{cleanup_id = ID})
   when ID =/= undefined,
        element(1, Msg) =:= create_bucket orelse
@@ -757,17 +757,17 @@ janitor_running({call, From}, Msg, #janitor_state{cleanup_id = ID})
             ok
     end,
     {next_state, idle, #idle_state{}, [{next_event, {call, From}, Msg}]};
-janitor_running(Type, Event, State) ->
-    handle_event(Type, Event, janitor_running, State).
+janitor_running(Type, Event, StateData) ->
+    handle_event(Type, Event, janitor_running, StateData).
 
 %% Asynchronous rebalancing events
 rebalancing(cast, {update_progress, Service, ServiceProgress},
-            #rebalancing_state{progress=Old} = State) ->
+            #rebalancing_state{progress=Old} = StateData) ->
     NewProgress = rebalance_progress:update(Service, ServiceProgress, Old),
     {next_state, rebalancing,
-     State#rebalancing_state{progress=NewProgress}};
+     StateData#rebalancing_state{progress=NewProgress}};
 rebalancing(info, {timeout, TRef, stop_timeout},
-            #rebalancing_state{rebalancer = Pid, stop_timer = TRef} = State) ->
+            #rebalancing_state{rebalancer = Pid, stop_timer = TRef} = StateData) ->
     ?log_debug("Stop rebalance timeout, brutal kill pid = ~p", [Pid]),
     exit(Pid, kill),
     Reason =
@@ -778,35 +778,35 @@ rebalancing(info, {timeout, TRef, stop_timeout},
             {'EXIT', Pid, R} ->
                 R
         end,
-    handle_rebalance_completion(Reason, State);
+    handle_rebalance_completion(Reason, StateData);
 rebalancing(info, {'EXIT', Pid, Reason},
-            #rebalancing_state{rebalancer = Pid} = State) ->
-    handle_rebalance_completion(Reason, State);
+            #rebalancing_state{rebalancer = Pid} = StateData) ->
+    handle_rebalance_completion(Reason, StateData);
 
 %% Synchronous rebalancing events
 rebalancing({call, From},
             {start_rebalance, _KeepNodes, _EjectNodes,
                               _FailedNodes, _DeltaNodes, _DeltaRecoveryBuckets},
-            _State) ->
+            _StateData) ->
     ?user_log(?REBALANCE_NOT_STARTED,
               "Not rebalancing because rebalance is already in progress.~n"),
     {keep_state_and_data, [{reply, From, in_progress}]};
-rebalancing({call, From}, {start_graceful_failover, _}, _State) ->
+rebalancing({call, From}, {start_graceful_failover, _}, _StateData) ->
     {keep_state_and_data, [{reply, From, in_progress}]};
 rebalancing({call, From}, stop_rebalance,
-            #rebalancing_state{rebalancer=Pid} = State) ->
+            #rebalancing_state{rebalancer=Pid} = StateData) ->
     ?log_debug("Sending stop to rebalancer: ~p", [Pid]),
     exit(Pid, {shutdown, stop}),
     TRef = erlang:start_timer(?STOP_REBALANCE_TIMEOUT, self(), stop_timeout),
-    {keep_state, State#rebalancing_state{stop_timer = TRef},
+    {keep_state, StateData#rebalancing_state{stop_timer = TRef},
      [{reply, From, ok}]};
 rebalancing({call, From}, rebalance_progress,
             #rebalancing_state{progress = Progress}) ->
     AggregatedProgress = dict:to_list(rebalance_progress:get_progress(Progress)),
     {keep_state_and_data, [{reply, From, {running, AggregatedProgress}}]};
-rebalancing({call, From}, {update_bucket, _, _, _, _}, _State) ->
+rebalancing({call, From}, {update_bucket, _, _, _, _}, _StateData) ->
     {keep_state_and_data, [{reply, From, rebalance_running}]};
-rebalancing({call, From}, Event, _State)
+rebalancing({call, From}, Event, _StateData)
   when element(1, Event) =:= create_bucket;
        element(1, Event) =:= delete_bucket;
        element(1, Event) =:= flush_bucket;
@@ -817,8 +817,8 @@ rebalancing({call, From}, Event, _State)
     ?log_warning("Got event ~p while rebalancing.", [Event]),
     {keep_state_and_data, [{reply, From, rebalance_running}]};
 
-rebalancing(Type, Event, State) ->
-    handle_event(Type, Event, rebalancing, State).
+rebalancing(Type, Event, StateData) ->
+    handle_event(Type, Event, rebalancing, StateData).
 
 %% Asynchronous recovery events
 recovery(info, {'EXIT', Pid, Reason}, #recovery_state{pid = Pid}) ->
@@ -826,10 +826,10 @@ recovery(info, {'EXIT', Pid, Reason}, #recovery_state{pid = Pid}) ->
               "Recovery process ~p terminated unexpectedly: ~p", [Pid, Reason]),
     {next_state, idle, #idle_state{}};
 %% Synchronous recovery events
-recovery({call, From}, {start_recovery, _Bucket}, _State) ->
+recovery({call, From}, {start_recovery, _Bucket}, _StateData) ->
     {keep_state_and_data, [{reply, From, recovery_running}]};
-recovery({call, From}, {commit_vbucket, Bucket, UUID, VBucket}, State) ->
-    Result = call_recovery_server(State,
+recovery({call, From}, {commit_vbucket, Bucket, UUID, VBucket}, StateData) ->
+    Result = call_recovery_server(StateData,
                                   commit_vbucket, [Bucket, UUID, VBucket]),
     case Result of
         recovery_completed ->
@@ -837,24 +837,24 @@ recovery({call, From}, {commit_vbucket, Bucket, UUID, VBucket}, State) ->
         _ ->
             {keep_state_and_data, [{reply, From, Result}]}
     end;
-recovery({call, From}, {stop_recovery, Bucket, UUID}, State) ->
-    case call_recovery_server(State, stop_recovery, [Bucket, UUID]) of
+recovery({call, From}, {stop_recovery, Bucket, UUID}, StateData) ->
+    case call_recovery_server(StateData, stop_recovery, [Bucket, UUID]) of
         ok ->
             {next_state, idle, #idle_state{}, [{reply, From, ok}]};
         Error ->
             {keep_state_and_data, [{reply, From, Error}]}
     end;
-recovery({call, From}, recovery_status, State) ->
+recovery({call, From}, recovery_status, StateData) ->
     {keep_state_and_data,
-        [{reply, From, call_recovery_server(State, recovery_status)}]};
-recovery({call, From}, {recovery_map, Bucket, RecoveryUUID}, State) ->
+        [{reply, From, call_recovery_server(StateData, recovery_status)}]};
+recovery({call, From}, {recovery_map, Bucket, RecoveryUUID}, StateData) ->
     {keep_state_and_data,
-     [{reply, From, call_recovery_server(State, recovery_map, [Bucket, RecoveryUUID])}]};
-recovery({call, From}, rebalance_progress, _State) ->
+     [{reply, From, call_recovery_server(StateData, recovery_map, [Bucket, RecoveryUUID])}]};
+recovery({call, From}, rebalance_progress, _StateData) ->
     {keep_state_and_data, [{reply, From, not_running}]};
-recovery({call, From}, stop_rebalance, _State) ->
+recovery({call, From}, stop_rebalance, _StateData) ->
     {keep_state_and_data, [{reply, From, not_rebalancing}]};
-recovery({call, From}, Event, _State)
+recovery({call, From}, Event, _StateData)
   when element(1, Event) =:= create_bucket;
        element(1, Event) =:= delete_bucket;
        element(1, Event) =:= flush_bucket;
@@ -864,26 +864,26 @@ recovery({call, From}, Event, _State)
        element(1, Event) =:= start_rebalance;
        element(1, Event) =:= start_graceful_failover ->
     {keep_state_and_data, [{reply, From, in_recovery}]};
-recovery(Type, Event, State) ->
-    handle_event(Type, Event, recovery, State).
+recovery(Type, Event, StateData) ->
+    handle_event(Type, Event, recovery, StateData).
 
 %%
 %% Internal functions
 %%
 
-do_request_janitor_run(Item, FsmState, State) ->
+do_request_janitor_run(Item, StateName, StateData) ->
     do_request_janitor_run(Item, fun(_Reason) -> ok end,
-                           FsmState, State).
+                           StateName, StateData).
 
-do_request_janitor_run(Item, Fun, FsmState, State) ->
+do_request_janitor_run(Item, Fun, StateName, StateData) ->
     RV = ns_janitor_server:request_janitor_run({Item, [Fun]}),
-    case FsmState =:= idle andalso RV =:= added of
+    case StateName =:= idle andalso RV =:= added of
         true ->
             self() ! janitor;
         false ->
             ok
     end,
-    {next_state, FsmState, State}.
+    {next_state, StateName, StateData}.
 
 -spec update_progress(service(), dict:dict()) -> ok.
 update_progress(Service, ServiceProgress) ->
@@ -1095,8 +1095,8 @@ do_set_rebalance_status(Status, RebalancerPid, GracefulPid) ->
                    {rebalancer_pid, RebalancerPid},
                    {graceful_failover_pid, GracefulPid}]).
 
-cancel_stop_timer(State) ->
-    do_cancel_stop_timer(State#rebalancing_state.stop_timer).
+cancel_stop_timer(StateData) ->
+    do_cancel_stop_timer(StateData#rebalancing_state.stop_timer).
 
 do_cancel_stop_timer(undefined) ->
     ok;
@@ -1106,29 +1106,29 @@ do_cancel_stop_timer(TRef) when is_reference(TRef) ->
     after 0 -> ok
     end.
 
-handle_rebalance_completion(Reason, State) ->
-    cancel_stop_timer(State),
-    maybe_reset_autofailover_count(Reason, State),
-    maybe_reset_reprovision_count(Reason, State),
-    log_rebalance_completion(Reason, State),
-    update_rebalance_counters(Reason, State),
-    update_rebalance_status(Reason, State),
+handle_rebalance_completion(Reason, StateData) ->
+    cancel_stop_timer(StateData),
+    maybe_reset_autofailover_count(Reason, StateData),
+    maybe_reset_reprovision_count(Reason, StateData),
+    log_rebalance_completion(Reason, StateData),
+    update_rebalance_counters(Reason, StateData),
+    update_rebalance_status(Reason, StateData),
     rpc:eval_everywhere(diag_handler, log_all_dcp_stats, []),
 
     R = consider_switching_compat_mode_dont_exit(),
-    case maybe_start_service_upgrader(Reason, R, State) of
-        {started, NewState} ->
-            {next_state, rebalancing, NewState};
+    case maybe_start_service_upgrader(Reason, R, StateData) of
+        {started, NewStateData} ->
+            {next_state, rebalancing, NewStateData};
         not_needed ->
-            maybe_eject_myself(Reason, State),
-            maybe_exit(R, State),
+            maybe_eject_myself(Reason, StateData),
+            maybe_exit(R, StateData),
             {next_state, idle, #idle_state{}}
     end.
 
-maybe_eject_myself(Reason, State) ->
-    case need_eject_myself(Reason, State) of
+maybe_eject_myself(Reason, StateData) ->
+    case need_eject_myself(Reason, StateData) of
         true ->
-            eject_myself(State);
+            eject_myself(StateData);
         false ->
             ok
     end.
@@ -1202,10 +1202,10 @@ reason2status(_Error, Type) ->
             [rebalance_type2text(Type)]),
     {none, iolist_to_binary(Msg)}.
 
-maybe_start_service_upgrader(normal, unchanged, _State) ->
+maybe_start_service_upgrader(normal, unchanged, _StateData) ->
     not_needed;
 maybe_start_service_upgrader(normal, {changed, OldVersion, NewVersion},
-                             #rebalancing_state{keep_nodes = KeepNodes} = State) ->
+                             #rebalancing_state{keep_nodes = KeepNodes} = StateData) ->
     Old = ns_cluster_membership:topology_aware_services_for_version(OldVersion),
     New = ns_cluster_membership:topology_aware_services_for_version(NewVersion),
 
@@ -1224,13 +1224,13 @@ maybe_start_service_upgrader(normal, {changed, OldVersion, NewVersion},
             ns_cluster:counter_inc(Type, start),
             Progress = rebalance_progress:init(KeepNodes, Services),
 
-            NewState = State#rebalancing_state{type = Type,
-                                               progress = Progress,
-                                               rebalancer = Pid},
+            NewStateData = StateData#rebalancing_state{type = Type,
+                                                       progress = Progress,
+                                                       rebalancer = Pid},
 
-            {started, NewState}
+            {started, NewStateData}
     end;
-maybe_start_service_upgrader(_Reason, _SwitchCompatResult, _State) ->
+maybe_start_service_upgrader(_Reason, _SwitchCompatResult, _StateData) ->
     %% rebalance failed, so we'll just let the user start rebalance again
     not_needed.
 
@@ -1266,8 +1266,8 @@ need_exit(_, service_upgrade) ->
 need_exit(_, _) ->
     false.
 
-call_recovery_server(State, Call) ->
-    call_recovery_server(State, Call, []).
+call_recovery_server(StateData, Call) ->
+    call_recovery_server(StateData, Call, []).
 
 call_recovery_server(#recovery_state{pid = Pid}, Call, Args) ->
     erlang:apply(recovery_server, Call, [Pid | Args]).
