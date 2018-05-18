@@ -489,6 +489,30 @@ handle_event(info, {cleanup_done, UnsafeNodes, ID}, janitor_running,
     consider_switching_compat_mode(),
     {next_state, idle, #idle_state{}};
 
+%% Backward compitibility: handle messages from nodes that are older than
+%%                         Mad-Hatter which use gen_fsm api's
+handle_event(info, {'$gen_sync_all_state_event', From, Event}, _StateName,
+             _StateData) ->
+    %% Backward compatibility warning:
+    %% Here we rely on the fact that gen_fsm:reply/2 and gen_statem:reply/2
+    %% do essentially the same thing, so when we accept call from gen_fsm
+    %% we actually can reply using gen_statem:reply/2 and that'll work.
+    %% This assumption needs to be re-evaluated on the new erlang upgrade.
+    %% This warning can be removed when vulcan support is dropped.
+    {keep_state_and_data, [{next_event, {call, From}, Event}]};
+
+handle_event(info, {'$gen_sync_event', From, Event}, _StateName, _StateData) ->
+    %% Backward compatibility warning:
+    %% Here we rely on the fact that gen_fsm:reply/2 and gen_statem:reply/2
+    %% do essentially the same thing, so when we accept call from gen_fsm
+    %% we actually can reply using gen_statem:reply/2 and that'll work.
+    %% This assumption needs to be re-evaluated on the new erlang upgrade.
+    %% This warning can be removed when vulcan support is dropped.
+    {keep_state_and_data, [{next_event, {call, From}, Event}]};
+
+handle_event(info, {'$gen_event', Event}, _StateName, _StateData) ->
+    {keep_state_and_data, [{next_event, cast, Event}]};
+
 handle_event({call, _}, Msg, StateName, _StateData) ->
     {stop, {unhandled, Msg, StateName}};
 
