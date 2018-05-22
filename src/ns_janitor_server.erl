@@ -30,8 +30,7 @@
          terminate_cleanup/1,
          request_janitor_run/1,
          delete_bucket_request/1,
-         run_cleanup/2,
-         garbage_collect_all_procs/0
+         run_cleanup/2
         ]).
 
 %% gen_server callbacks.
@@ -199,14 +198,8 @@ run_cleanup(Parent, Requests) ->
                           []
                   end,
 
-    [rpc:call(N, ns_janitor_server, garbage_collect_all_procs, [])
-        || N <- [node()|nodes()]],
-
     %% Return the individual cleanup status back to the parent.
     ok = gen_server:cast(Parent, {cleanup_complete, RequestsRV, UnsafeNodes}).
-
-garbage_collect_all_procs() ->
-    [erlang:garbage_collect(P) || P <- erlang:processes()].
 
 do_run_cleanup(services, _Options) ->
     service_janitor:cleanup();
