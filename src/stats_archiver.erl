@@ -54,11 +54,12 @@ start_link(Bucket) ->
 %% {Period, Seconds, Samples}
 archives() ->
     [{minute, 1,     60},
-     {hour,   4,     900},
-     {day,    60,    1440}, % 24 hours
-     {week,   600,   1152}, % eight days (computer weeks)
-     {month,  1800,  1488}, % 31 days
-     {year,   21600, 1464}]. % 366 days
+     {hour,   4,     900}
+     %{day,    60,    1440}, % 24 hours
+     %{week,   600,   1152}, % eight days (computer weeks)
+     %{month,  1800,  1488}, % 31 days
+     %{year,   21600, 1464}
+     ]. % 366 days
 
 
 %% @doc Generate a suitable name for the ETS stats table.
