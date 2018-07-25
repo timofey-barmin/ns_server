@@ -64,8 +64,8 @@
 -define(SECURITY_READ, {[admin, security, admin], read}).
 -define(SECURITY_WRITE, {[admin, security, admin], write}).
 
-assert_is_ldap_enabled() ->
-    case cluster_compat_mode:is_ldap_enabled() of
+assert_is_saslauthd_enabled() ->
+    case cluster_compat_mode:is_saslauthd_enabled() of
         true ->
             ok;
         false ->
@@ -78,7 +78,7 @@ assert_is_ldap_enabled() ->
     end.
 
 handle_saslauthd_auth_settings(Req) ->
-    assert_is_ldap_enabled(),
+    assert_is_saslauthd_enabled(),
 
     menelaus_util:reply_json(Req, {saslauthd_auth:build_settings()}).
 
@@ -136,7 +136,7 @@ parse_validate_saslauthd_settings(Params) ->
     end.
 
 handle_saslauthd_auth_settings_post(Req) ->
-    assert_is_ldap_enabled(),
+    assert_is_saslauthd_enabled(),
 
     case parse_validate_saslauthd_settings(mochiweb_request:parse_post(Req)) of
         {ok, Props} ->
@@ -148,7 +148,7 @@ handle_saslauthd_auth_settings_post(Req) ->
     end.
 
 handle_validate_saslauthd_creds_post(Req) ->
-    assert_is_ldap_enabled(),
+    assert_is_saslauthd_enabled(),
     case cluster_compat_mode:is_cluster_45() of
         true ->
             erlang:throw(

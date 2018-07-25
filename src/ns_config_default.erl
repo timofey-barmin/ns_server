@@ -70,8 +70,8 @@ init_is_enterprise() ->
             is_forced("FORCE_ENTERPRISE")
     end.
 
-init_ldap_enabled() ->
-    IsForced = is_forced("FORCE_LDAP"),
+init_saslauthd_enabled() ->
+    IsForced = is_forced("FORCE_SASLAUTHD"),
     IsLinux = os:type() =:= {unix, linux},
 
     IsForced orelse IsLinux.
@@ -93,7 +93,7 @@ default() ->
     ok = misc:mkdir_p(BreakpadMinidumpDir),
 
     IsEnterprise = init_is_enterprise(),
-    LdapEnabled = init_ldap_enabled(),
+    SASLAuthdEnabled = init_saslauthd_enabled(),
 
     {ok, LogDir} = application:get_env(ns_server, error_logger_mf_dir),
 
@@ -108,7 +108,7 @@ default() ->
     [{{node, node(), config_version}, get_current_version()},
      {directory, path_config:component_path(data, "config")},
      {{node, node(), is_enterprise}, IsEnterprise},
-     {{node, node(), ldap_enabled}, LdapEnabled},
+     {{node, node(), saslauthd_enabled}, SASLAuthdEnabled},
      {index_aware_rebalance_disabled, false},
      {max_bucket_count, 10},
      {autocompaction, [{database_fragmentation_threshold, {30, undefined}},
