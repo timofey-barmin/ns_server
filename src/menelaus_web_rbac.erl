@@ -1570,11 +1570,46 @@ handle_ldap_settings_post(Req) ->
     assert_groups_and_ldap_enabled(),
     validator:handle(
       fun (Props) ->
-              ?log_debug("Saving ldap settings: ~p", [Props]),
               OldProps = ldap_auth:build_settings(),
-              ldap_auth:set_settings(misc:update_proplist(OldProps, Props)),
-              handle_ldap_settings(Req)
+              NewProps = misc:update_proplist(OldProps, Props),
+              case proplists:get_value(validate_only, NewProps) of
+                  undefined ->
+                      ?log_debug("Saving ldap settings: ~p", [Props]),
+                      ldap_auth:set_settings(NewProps),
+                      handle_ldap_settings(Req);
+                  ValidationType ->
+                      Res = validate_ldap_settings(ValidationType, NewProps),
+                      menelaus_util:reply_json(Req, {Res})
+              end
       end, Req, form, ldap_settings_validators()).
+
+validate_ldap_settings(connectivity, Settings) ->
+    case ldap_auth:with_connection(Settings, fun (_) -> ok end) of
+        ok ->
+            [{validation_result, success}];
+        {error, Error} ->
+            Bin = iolist_to_binary(ldap_auth:format_error(Error)),
+            [{validation_result, error},
+             {reason, Bin}]
+    end;
+validate_ldap_settings(authentication, Settings) ->
+    User = proplists:get_value(validate_auth_user, Settings),
+    Pass = proplists:get_value(validate_auth_pass, Settings),
+    case ldap_auth:authenticate(User, Pass, Settings) of
+        true -> [{validation_result, success}];
+        false -> [{validation_result, error}]
+    end;
+validate_ldap_settings(groups_query, Settings) ->
+    GroupsUser = proplists:get_value(validate_groups_query_user, Settings),
+    case ldap_auth:user_groups(GroupsUser, Settings) of
+        {ok, Groups} ->
+            [{validation_result, success},
+             {groups, [list_to_binary(G) || G <- Groups]}];
+        {error, Error2} ->
+            Bin2 = iolist_to_binary(ldap_auth:format_error(Error2)),
+            [{validation_result, error},
+             {reason, Bin2}]
+    end.
 
 ldap_settings_validators() ->
     [
@@ -1588,8 +1623,23 @@ ldap_settings_validators() ->
         validate_ldap_dn(query_dn, _),
         validator:touch(query_pass, _),
         validate_ldap_groups_query(groups_query, _),
+        validator:one_of(validate_only, ["connectivity", "authentication",
+                                         "groups_query"], _),
+        validator:convert(validate_only, fun list_to_atom/1, _),
+        validate_validation_params(validate_only, _),
         validator:unsupported(_)
     ].
+
+validate_validation_params(Name, State) ->
+    case validator:get_value(Name, State) of
+        undefined -> State;
+        connectivity -> State;
+        authentication ->
+            validator:required(validate_auth_user,
+                               validator:required(validate_auth_pass, State));
+        groups_query ->
+            validator:required(validate_groups_query_user, State)
+    end.
 
 validate_ldap_hosts(Name, State) ->
     validator:validate(
