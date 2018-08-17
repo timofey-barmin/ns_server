@@ -76,10 +76,9 @@ open_connection(Sock, ConnName, Type, RepFeatures, Logger) ->
                                   #mc_entry{key = ConnName,ext = Extra}})).
 
 negotiate_xattr(Sock, AgentName) ->
-    Data = <<?MC_FEATURE_XATTR:16>>,
-    case mc_client_binary:hello(Sock, AgentName, Data) of
-        {ok, RV} ->
-            {ok, Data =:= RV};
+    case mc_client_binary:hello(Sock, AgentName, [xattr]) of
+        {ok, [xattr]} -> {ok, true};
+        {ok, _} -> {ok, false};
         Error ->
             ?log_debug("XATTR negotiation failed. Reason = ~p", [Error]),
             Error
