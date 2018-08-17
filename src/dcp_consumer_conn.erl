@@ -60,7 +60,7 @@ init([RepFeatures], ParentState) ->
 handle_packet(response, ?DCP_ADD_STREAM, Packet,
               #state{state = #stream_state{to_add = ToAdd, errors = Errors} = StreamState}
               = State, ParentState) ->
-    {Header, Body} = mc_binary:decode_packet(Packet),
+    {Header, Body, <<>>} = mc_binary:decode_packet(Packet),
 
     {Partition, NewToAdd, NewErrors} =
         process_add_stream_response(Header, ToAdd, Errors, ParentState),
@@ -82,7 +82,7 @@ handle_packet(response, ?DCP_ADD_STREAM, Packet,
               #state{state = #takeover_state{owner = From, partition = Partition, open_ack = false}
                      = TakeoverState} = State, ParentState) ->
 
-    {Header, Body} = mc_binary:decode_packet(Packet),
+    {Header, Body, <<>>} = mc_binary:decode_packet(Packet),
     case {dcp_commands:process_response(Header, Body), Header#mc_header.opaque} of
         {{ok, _}, Partition} ->
             NewTakeoverState = TakeoverState#takeover_state{open_ack = true},
@@ -99,7 +99,7 @@ handle_packet(response, ?DCP_ADD_STREAM, Packet,
 handle_packet(request, ?DCP_STREAM_REQ, Packet,
               #state{state = #takeover_state{state = requested, partition = Partition}
                      = TakeoverState} = State, ParentState) ->
-    {Header, _Body} = mc_binary:decode_packet(Packet),
+    {Header, _Body, <<>>} = mc_binary:decode_packet(Packet),
     Partition = Header#mc_header.vbucket,
     NewTakeoverState = TakeoverState#takeover_state{state = opaque_known,
                                                     opaque = Header#mc_header.opaque},
@@ -108,7 +108,7 @@ handle_packet(request, ?DCP_STREAM_REQ, Packet,
 handle_packet(response, ?DCP_CLOSE_STREAM, Packet,
               #state{state = #stream_state{to_close = ToClose, errors = Errors} = StreamState}
               = State, ParentState) ->
-    {Header, _Body} = mc_binary:decode_packet(Packet),
+    {Header, _Body, <<>>} = mc_binary:decode_packet(Packet),
 
     {Partition, NewToClose, NewErrors} =
         process_close_stream_response(Header, ToClose, Errors, consumer, ParentState),
@@ -129,7 +129,7 @@ handle_packet(response, ?DCP_SET_VBUCKET_STATE, Packet,
                                              owner = From,
                                              requested_partition_state = VbState} = TakeoverState}
               = State, ParentState) ->
-    {Header, _Body} = mc_binary:decode_packet(Packet),
+    {Header, _Body, <<>>} = mc_binary:decode_packet(Packet),
 
     case {Header#mc_header.opaque, Header#mc_header.status} of
         {Opaque, ?SUCCESS} ->
@@ -260,7 +260,7 @@ handle_cast({producer_stream_closed, Packet},
             #state{state = #stream_state{to_close_on_producer = ToClose,
                                          errors = Errors} = StreamState} = State,
             ParentState) ->
-    {Header, _Body} = mc_binary:decode_packet(Packet),
+    {Header, _Body, <<>>} = mc_binary:decode_packet(Packet),
 
     {Partition, NewToClose, NewErrors} =
         process_close_stream_response(Header, ToClose, Errors, producer, ParentState),
@@ -281,7 +281,7 @@ handle_cast({set_vbucket_state, Packet},
                                            partition = Partition,
                                            requested_partition_state = none} = TakeoverState}
             = State, ParentState) ->
-    {Header, Body} = mc_binary:decode_packet(Packet),
+    {Header, Body, <<>>} = mc_binary:decode_packet(Packet),
     <<VbState:8>> = Body#mc_entry.ext,
 
     case Header#mc_header.opaque of
@@ -303,7 +303,7 @@ handle_cast({producer_stream_end, _Packet}, #state{state = shut} = State,
     %% Do nothing if the connection is already shutdown.
     {noreply, State, ParentState};
 handle_cast({producer_stream_end, Packet}, State, ParentState) ->
-    {Header, _Body} = mc_binary:decode_packet(Packet),
+    {Header, _Body, <<>>} = mc_binary:decode_packet(Packet),
 
     %% Does the vBucket have an active stream?
     StreamToEnd = Header#mc_header.vbucket,

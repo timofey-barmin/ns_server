@@ -164,11 +164,11 @@ command_2_atom(_) ->
 
 -spec format_packet_nicely(binary()) -> nonempty_string().
 format_packet_nicely(<<?REQ_MAGIC:8, _Rest/binary>> = Packet) ->
-    {Header, _Body} = mc_binary:decode_packet(Packet),
+    {Header, _Body, <<>>} = mc_binary:decode_packet(Packet),
     format_packet_nicely("REQUEST", "", Header, Packet);
 format_packet_nicely(<<?RES_MAGIC:8, _Opcode:8, _KeyLen:16, _ExtLen:8,
                        _DataType:8, Status:16, _Rest/binary>> = Packet) ->
-    {Header, _Body} = mc_binary:decode_packet(Packet),
+    {Header, _Body, <<>>} = mc_binary:decode_packet(Packet),
     format_packet_nicely("RESPONSE",
                          io_lib:format(" status = ~.16X (~w)",
                                        [Status, "0x", mc_client_binary:map_status(Status)]),

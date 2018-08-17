@@ -204,10 +204,17 @@ decode_header(res, <<?RES_MAGIC:8, Opcode:8, KeyLen:16, ExtLen:8,
      #mc_entry{datatype = DataType, cas = CAS}}.
 
 decode_packet(<<HeaderBin:?HEADER_LEN/binary, Body/binary>>) ->
-    {#mc_header{extlen = ExtLen, keylen = KeyLen} = Header, Entry} =
-        decode_header(HeaderBin),
-    <<Ext:ExtLen/binary, Key:KeyLen/binary, Data/binary>> = Body,
-    {Header, Entry#mc_entry{ext = Ext, key = Key, data = Data}}.
+    {Header, Entry} = decode_header(HeaderBin),
+    #mc_header{extlen = ExtLen, keylen = KeyLen, bodylen = BodyLen} = Header,
+    DataLen = BodyLen - KeyLen - ExtLen,
+    case Body of
+        <<Ext:ExtLen/binary, Key:KeyLen/binary, Data:DataLen/binary,
+          Rest/binary>> ->
+            {Header, Entry#mc_entry{ext = Ext, key = Key, data = Data}, Rest};
+        _ ->
+            need_more_data
+    end;
+decode_packet(_) -> need_more_data.
 
 bin(undefined) -> <<>>;
 bin(X)         -> iolist_to_binary(X).
