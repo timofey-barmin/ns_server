@@ -200,9 +200,10 @@
 -define(DCP_CONTROL,               16#5e).
 
 %% RBAC commands
--define(RBAC_PROVIDER,             16#F8).
--define(RBAC_GET_USER_PERMISSION,  16#02).
--define(RBAC_AUTH_REQUEST,         16#03).
+-define(RBAC_PROVIDER,                16#F8).
+-define(RBAC_REVOKE_USER_PERMISSIONS, 16#F6).
+-define(RBAC_GET_USER_PERMISSION,     16#02).
+-define(RBAC_AUTH_REQUEST,            16#03).
 
 %% datatypes enum
 -define(MC_DATATYPE_RAW_BYTES,      16#00).

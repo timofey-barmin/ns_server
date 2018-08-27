@@ -67,7 +67,8 @@
          audit_config_reload/1,
          refresh_rbac/1,
          subdoc_multi_lookup/5,
-         get_failover_log/2
+         get_failover_log/2,
+         revoke_user_permissions/2
         ]).
 
 -type recv_callback() :: fun((_, _, _) -> any()) | undefined.
@@ -986,4 +987,12 @@ get_failover_log(Sock, VB) ->
             unpack_failover_log(ME#mc_entry.data);
         Response ->
             process_error_response(Response)
+    end.
+
+revoke_user_permissions(Sock, {Username, Domain}) ->
+    Key = ejson:encode({[{list_to_binary(Username), list_to_binary(Domain)}]}),
+    case cmd(?RBAC_REVOKE_USER_PERMISSIONS, Sock, undefined, undefined,
+             {#mc_header{}, #mc_entry{key = Key}}) of
+        {ok, #mc_header{status = ?SUCCESS}, _, _} -> ok;
+        Response -> process_error_response(Response)
     end.
