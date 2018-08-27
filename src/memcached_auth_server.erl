@@ -102,6 +102,45 @@ process_data(#s{mcd_socket = Sock, data = Data} = State) ->
         need_more_data -> State
     end.
 
+process_req(#mc_header{opcode = ?RBAC_AUTH_REQUEST} = Header,
+            #mc_entry{data = Data}, State) ->
+    {AuthReq} = ejson:decode(Data),
+    ErrorResp =
+        fun (Msg) ->
+                UUID = misc:hexify(crypto:strong_rand_bytes(16)),
+                ?log_info("Auth failed with reason: '~s' (UUID: ~s)",
+                          [Msg, UUID]),
+                Json = {[{error, {[{context, <<"Authentication failed">>},
+                                   {ref, UUID}]}}]},
+                {Header#mc_header{status = ?MC_AUTH_ERROR},
+                 #mc_entry{data = ejson:encode(Json)}}
+        end,
+    case proplists:get_value(<<"mechanism">>, AuthReq) of
+        <<"PLAIN">> ->
+            Challenge = proplists:get_value(<<"challenge">>, AuthReq),
+            case sasl_decode_plain_challenge(Challenge) of
+                {ok, {"", Username, Password}} ->
+                    case menelaus_auth:authenticate({Username, Password}) of
+                        {ok, {Username, Domain} = Id} ->
+                            JSON = get_user_rbac_record_json(Id, State),
+                            Resp = {[{response, <<"Authenticated">>},
+                                     {username, list_to_binary(Username)},
+                                     {domain, atom_to_binary(Domain, latin1)},
+                                     {rbac, JSON}]},
+                            {Header#mc_header{status = ?SUCCESS},
+                             #mc_entry{data = ejson:encode(Resp)}};
+                        _ ->
+                            ErrorResp("Invalid username or password")
+                    end;
+                {ok, {_Authzid, _, _}} ->
+                    ErrorResp("Authzid is not supported");
+                error ->
+                    ErrorResp("Invalid challenge")
+            end;
+        Unknown ->
+            ErrorResp(io_lib:format("Unknown mechanism: ~p", [Unknown]))
+    end;
+
 process_req(#mc_header{opcode = ?RBAC_GET_USER_PERMISSION} = Header,
             #mc_entry{key = IdentityJSON}, State) ->
     RespHeader = Header#mc_header{status = ?SUCCESS},
@@ -162,6 +201,24 @@ connect() ->
                        "to memcached: ~p", [Reason]),
             {error, Reason}
     end.
+
+%% RFC4616
+sasl_decode_plain_challenge(undefined) -> error;
+sasl_decode_plain_challenge(Challenge) ->
+    try base64:decode(Challenge) of
+        Decoded ->
+            case binary:split(Decoded, <<0>>, [global]) of
+                [Authzid, Authcid, Passwd] ->
+                    {ok, {binary_to_list(Authzid),
+                          binary_to_list(Authcid),
+                          binary_to_list(Passwd)}};
+                _ ->
+                    error
+            end
+    catch
+        _:_ -> error
+    end.
+
 
 -ifdef(EUNIT).
 
