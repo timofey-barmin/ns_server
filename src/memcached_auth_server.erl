@@ -222,53 +222,108 @@ sasl_decode_plain_challenge(Challenge) ->
 
 -ifdef(EUNIT).
 
-get_user_permissions_test() ->
-    meck:new(mc_binary, [passthrough]),
-    meck:new(menelaus_roles, [passthrough]),
-    meck:expect(menelaus_roles, get_compiled_roles,
-                fun ({"Unknown", local}) ->
-                        [];
-                    ({"User1", external}) ->
-                        [[{[admin, security], all},
-                          {[{bucket, any}], [read]}],
-                         [{[{bucket, "b1"}, data, docs], [insert, upsert]},
-                          {[{bucket, "b2"}, data, xattr], [write]}]]
-                end),
+process_data_test() ->
+    Roles = [[{[admin, security], all},
+              {[{bucket, any}], [read]}],
+             [{[{bucket, "b1"}, data, docs], [insert, upsert]},
+              {[{bucket, "b2"}, data, xattr], [write]}]],
+    Users = [{{"User1", "foo"}, local, []},
+             {{"User2", "bar"}, external, Roles}],
+
+    with_mocked_users(
+      Users,
+      fun () ->
+          test_process_data(
+            {?RBAC_AUTH_REQUEST, undefined,
+             {[{mechanism, <<"PLAIN">>}, {challenge, <<"AFVzZXIxAGZvbw==">>}]}},
+            fun (?RBAC_AUTH_REQUEST, ?SUCCESS, undefined,
+                 {[{<<"response">>, <<"Authenticated">>},
+                   {<<"username">>, <<"User1">>},
+                   {<<"domain">>, <<"local">>},
+                   {<<"rbac">>, {[{<<"buckets">>, _}, {<<"privileges">>, _}|_]}}
+                  ]}) -> ok
+            end),
+          test_process_data(
+            {?RBAC_AUTH_REQUEST, undefined,
+             {[{mechanism, <<"PLAIN">>}, {challenge, <<"AGpvaG4AYmFy">>}]}},
+            fun (?RBAC_AUTH_REQUEST, ?MC_AUTH_ERROR, undefined,
+                 {[{<<"error">>, {[
+                      {<<"context">>, <<"Authentication failed">>},
+                      {<<"ref">>, _}]}}]}) -> ok
+            end),
+          test_process_data(
+            {?RBAC_GET_USER_PERMISSION, {[{<<"User1">>, local}]}, undefined},
+            fun (?RBAC_GET_USER_PERMISSION, ?SUCCESS,
+                 {[{<<"User1">>, <<"local">>}]},
+                 {[{<<"buckets">>,{[{<<"b1">>,[]}]}},
+                   {<<"privileges">>,[]}|_]}) -> ok
+            end),
+          test_process_data(
+            {?RBAC_GET_USER_PERMISSION, {[{<<"User2">>, external}]}, undefined},
+            fun (?RBAC_GET_USER_PERMISSION, ?SUCCESS,
+                 {[{<<"User2">>, <<"external">>}]},
+                 {[{<<"buckets">>, {[{<<"b1">>, [_|_]}]}},
+                   {<<"privileges">>, [_|_]}|_]}) -> ok
+            end)
+      end),
+    ok.
+
+test_process_data(InputMessages, Validator) when is_list(InputMessages) ->
+    Encode = fun (undefined) -> undefined; (D) -> ejson:encode(D) end,
+    Decode = fun (undefined) -> undefined; (D) -> ejson:decode(D) end,
+    InputData =
+        lists:map(
+          fun ({Op, Key, Data}) ->
+              Header = #mc_header{opcode = Op},
+              Entry = #mc_entry{key = Encode(Key),
+                                data = Encode(Data)},
+              mc_binary:encode(req, Header, Entry)
+          end, InputMessages),
+    Bin = iolist_to_binary(InputData),
     meck:expect(
       mc_binary, send,
       fun (my_socket, res,
-           #mc_header{opcode = ?RBAC_GET_USER_PERMISSION, status = ?SUCCESS},
-           #mc_entry{key = <<"{\"Unknown\":\"local\"}">>, data = Data}) ->
-              ?assertMatch({[{<<"buckets">>,{[{<<"b1">>,[]},{<<"b2">>,[]}]}},
-                             {<<"privileges">>,[]}|_]}, ejson:decode(Data)),
-              ok;
-          (my_socket, res,
-           #mc_header{opcode = ?RBAC_GET_USER_PERMISSION, status = ?SUCCESS},
-           #mc_entry{key = <<"{\"User1\":\"external\"}">>, data = Data}) ->
-              ?assertMatch(
-                  {[{<<"buckets">>, {[{<<"b1">>, [_|_]}, {<<"b2">>, [_|_]}]}},
-                    {<<"privileges">>, [_|_]}|_]}, ejson:decode(Data)),
-              ok
+           #mc_header{opcode = Op, status = Status},
+           #mc_entry{key = Key, data = Data}) ->
+              ?assertEqual(
+                ok, Validator(Op, Status, Decode(Key), Decode(Data)))
       end),
-    Header = #mc_header{opcode = ?RBAC_GET_USER_PERMISSION},
-    Entry1 = #mc_entry{key = <<"{\"User1\":\"external\"}">>},
-    Data1 = iolist_to_binary(mc_binary:encode(req, Header, Entry1)),
-    Entry2 = #mc_entry{key = <<"{\"Unknown\":\"local\"}">>},
-    Data2 = iolist_to_binary(mc_binary:encode(req, Header, Entry2)),
-
     ?assertMatch(#s{data = <<"rest">>},
                  process_data(#s{mcd_socket = my_socket,
-                                 data = <<Data1/binary, Data2/binary, "rest">>,
-                                 buckets = ["b1", "b2"]})),
+                                 data = <<Bin/binary, "rest">>,
+                                 buckets = ["b1"]}));
+test_process_data(InputMessage, Validator) ->
+    test_process_data([InputMessage], Validator).
 
-    ?assertMatch(#s{data = <<>>},
-                 process_data(#s{mcd_socket = my_socket,
-                                 data = Data2,
-                                 buckets = ["b1", "b2"]})),
+with_mocked_users(Users, Fun) ->
+    meck:new(mc_binary, [passthrough]),
+    meck:new(menelaus_roles, [passthrough]),
+    meck:new(menelaus_auth, [passthrough]),
+    try
+        meck:expect(menelaus_auth, authenticate,
+                    fun ({Name, Pass}) ->
+                            case [{N, D} || {{N, P}, D, _} <- Users,
+                                            N == Name, P == Pass] of
+                                [Id] -> {ok, Id};
+                                [] -> false
+                            end
+                    end),
 
-    true = meck:validate(menelaus_roles),
-    true = meck:validate(mc_binary),
-    meck:unload(menelaus_roles),
-    meck:unload(mc_binary),
+        meck:expect(menelaus_roles, get_compiled_roles,
+                    fun ({Name, Domain}) ->
+                            [Roles] = [R || {{N, _}, D, R} <- Users,
+                                            N == Name, D == Domain],
+                            Roles
+                    end),
+        Fun(),
+        true = meck:validate(menelaus_auth),
+        true = meck:validate(menelaus_roles),
+        true = meck:validate(mc_binary)
+    after
+        meck:unload(menelaus_auth),
+        meck:unload(menelaus_roles),
+        meck:unload(mc_binary)
+    end,
     ok.
+
 -endif.
